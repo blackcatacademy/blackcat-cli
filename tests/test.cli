@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+ROOT=$(realpath "$SCRIPT_DIR/../")
+php "$ROOT/bin/blackcat" help
+
+php "$ROOT/bin/blackcat" status --json | grep '"command"' >/dev/null
+php "$ROOT/bin/blackcat" verify --json >/dev/null
+
+test -s "$ROOT/var/cli-events.ndjson"
+test -s "$ROOT/var/cli-metrics.prom"

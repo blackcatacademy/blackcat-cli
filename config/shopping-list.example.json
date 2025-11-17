@@ -1,0 +1,13 @@
+{
+  "tenant": "acme-sandbox",
+  "contact": {
+    "name": "Ops Team",
+    "email": "ops@example.test"
+  },
+  "modules": [
+    "blackcat-auth",
+    "blackcat-database",
+    "blackcat-governance"
+  ],
+  "notes": "Generated from Stage 1 CLI template"
+}
