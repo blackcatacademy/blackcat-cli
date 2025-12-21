@@ -1,0 +1,13 @@
+includes:
+  - vendor/phpstan/phpstan-phpunit/extension.neon
+
+parameters:
+  level: 8
+  paths:
+    - src
+    - tests
+  bootstrapFiles:
+    - phpstan.bootstrap.php
+  tmpDir: var/phpstan
+  tipsOfTheDay: false
+

@@ -1,0 +1,131 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Core\Database;
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+use BlackCat\DatabaseCrypto\Ops\CryptoKeysInventorySync;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * Sync local `*.key` files into the `crypto_keys` table for audit/rotation planning.
+ *
+ * Usage:
+ *   blackcat db-crypto keys-sync --dsn="mysql:host=127.0.0.1;dbname=blackcat" [--user=...] [--pass=...] [--keys-dir=DIR] [--meta=JSON] [--strict] [--config=/path/to/config.json]
+ *
+ * Config:
+ *   - crypto.keys_dir (recommended)
+ *
+ * Env fallbacks:
+ *   DB_DSN, DB_USER, DB_PASSWORD
+ */
+
+function usage(): void
+{
+    fwrite(STDERR, "Usage: blackcat db-crypto keys-sync --dsn=DSN [--user=USER] [--pass=PASS] [--keys-dir=DIR] [--meta=JSON] [--strict] [--config=/path/to/config.json]\n");
+    exit(1);
+}
+
+/**
+ * @param list<string> $args
+ * @return array<string,string|bool>
+ */
+function parse_args(array $args): array
+{
+    $out = [];
+    foreach ($args as $arg) {
+        if ($arg === '--strict') {
+            $out['strict'] = true;
+            continue;
+        }
+        if (!str_starts_with($arg, '--')) {
+            continue;
+        }
+        [$k, $v] = array_pad(explode('=', substr($arg, 2), 2), 2, '');
+        if ($k !== '') {
+            $out[$k] = $v;
+        }
+    }
+    return $out;
+}
+
+$opts = parse_args(array_slice($argv, 1));
+initRuntimeConfig($opts);
+$dsn = (string)($opts['dsn'] ?? (getenv('DB_DSN') ?: ''));
+if ($dsn === '') {
+    usage();
+}
+
+$user = (string)($opts['user'] ?? (getenv('DB_USER') ?: ''));
+$pass = (string)($opts['pass'] ?? (getenv('DB_PASSWORD') ?: ''));
+$keysDir = resolveKeysDir($opts);
+if ($keysDir === '') {
+    usage();
+}
+
+$meta = [];
+if (!empty($opts['meta'])) {
+    $decoded = json_decode((string)$opts['meta'], true);
+    if (is_array($decoded)) {
+        $meta = $decoded;
+    }
+}
+
+if (!Database::isInitialized()) {
+    Database::init([
+        'dsn' => $dsn,
+        'user' => $user !== '' ? $user : null,
+        'pass' => $pass !== '' ? $pass : null,
+        'appName' => 'blackcat-dbcrypto-keys-sync',
+    ]);
+}
+
+$db = Database::getInstance();
+$sync = new CryptoKeysInventorySync($db);
+
+$result = $sync->syncDirectory($keysDir, [
+    'strict' => (bool)($opts['strict'] ?? false),
+    'meta' => $meta,
+]);
+
+echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+exit($result['skipped'] > 0 ? 2 : 0);
+
+/**
+ * @param array<string,string|bool> $opts
+ */
+function initRuntimeConfig(array $opts): void
+{
+    $cfg = $opts['config'] ?? ($opts['config-file'] ?? null);
+    if ($cfg === '1') {
+        $cfg = '';
+    }
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+}
+
+/**
+ * @param array<string,string|bool> $opts
+ */
+function resolveKeysDir(array $opts): string
+{
+    $opt = $opts['keys-dir'] ?? ($opts['keys_dir'] ?? null);
+    if (is_string($opt) && trim($opt) !== '') {
+        return trim($opt);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('crypto.keys_dir');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+    }
+
+    fwrite(STDERR, "Missing keys dir: pass --keys-dir=DIR or set runtime config crypto.keys_dir (or use --config=...)\n");
+    return '';
+}

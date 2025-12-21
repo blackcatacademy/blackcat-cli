@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BlackCat\Cli;
 
 use BlackCat\Cli\Config\CliConfig;
+use BlackCat\Cli\Manifest\CommandRegistry;
+use BlackCat\Cli\Manifest\CommandSpec;
 use BlackCat\Cli\Security\IntegrationChecker;
 use BlackCat\Cli\Telemetry\CliTelemetry;
 use InvalidArgumentException;
@@ -13,10 +15,14 @@ final class BlackCatCli
 {
     private function __construct(
         private readonly CliConfig $config,
-        private readonly CliTelemetry $telemetry
+        private readonly CliTelemetry $telemetry,
+        private readonly CommandRegistry $registry
     ) {
     }
 
+    /**
+     * @param string[] $argv
+     */
     public static function run(array $argv): int
     {
         [$options, $args] = self::parseArguments($argv);
@@ -24,14 +30,15 @@ final class BlackCatCli
         $commandArgs = array_slice($args, 1);
 
         try {
-            $config = CliConfig::fromFile($options['config'] ?? null);
+            $config = CliConfig::fromFile($options['cli_config'] ?? null);
         } catch (InvalidArgumentException $e) {
             fwrite(STDERR, '[blackcat-cli] ' . $e->getMessage() . PHP_EOL);
             return 1;
         }
 
+        $registry = CommandRegistry::fromWorkspaceRoot($config->workspaceRoot());
         $telemetry = new CliTelemetry($config->telemetryEventsFile(), $config->telemetryMetricsFile());
-        $app = new self($config, $telemetry);
+        $app = new self($config, $telemetry, $registry);
 
         $started = microtime(true);
         try {
@@ -64,13 +71,13 @@ final class BlackCatCli
                 break;
             }
 
-            if ($arg === '--config') {
-                $options['config'] = array_shift($args) ?: null;
+            if ($arg === '--cli-config') {
+                $options['cli_config'] = array_shift($args) ?: null;
                 continue;
             }
 
-            if (str_starts_with((string) $arg, '--config=')) {
-                $options['config'] = substr((string) $arg, 9) ?: null;
+            if (str_starts_with((string) $arg, '--cli-config=')) {
+                $options['cli_config'] = substr((string) $arg, 13) ?: null;
                 continue;
             }
 
@@ -91,21 +98,48 @@ final class BlackCatCli
             'configure' => $this->runShoppingListCommand('configure', $args[0] ?? null),
             'status' => $this->runStatus($args),
             'verify' => $this->runVerify($args),
-            default => $this->runConfiguredCommand($command, $args),
+            default => $this->runAnyCommand($command, $args),
         };
     }
 
     private function printHelp(): int
     {
         echo "BlackCat CLI\n";
-        echo "Usage: blackcat [--config=path] <command> [args...]\n\n";
+        echo "Usage: blackcat [--cli-config=path] <command> [args...]\n\n";
         echo "Commands:\n";
         echo "  configure <shopping-list.json>    Configure shopping list via installer\n";
         echo "  install <shopping-list.json>      Run blackcat-install pipeline\n";
         echo "  status [--json]                   List configured proxies + status\n";
         echo "  verify [--json]                   Security + integration checks\n";
-        echo "  crypto|observability|agent|auth|db|governance|security ... (proxied)\n";
-        echo "\nSet BLACKCAT_CLI_CONFIG or pass --config to point at another config file.\n";
+        echo "\nConfigured proxy commands:\n";
+
+        $configured = array_keys($this->config->commands());
+        sort($configured);
+        foreach ($configured as $name) {
+            echo "  {$name}\n";
+        }
+
+        $dynamic = $this->registry->commands();
+        if ($dynamic !== []) {
+            echo "\nDiscovered manifest commands:\n";
+            $names = array_keys($dynamic);
+            sort($names);
+            foreach ($names as $name) {
+                if (in_array($name, $configured, true)) {
+                    continue;
+                }
+                $spec = $dynamic[$name];
+                $type = $spec->isBuiltin() ? 'builtin' : 'proxy';
+                echo sprintf("  %-16s (%s) %s\n", $name, $type, $spec->summary());
+            }
+        }
+
+        if ($this->registry->errors() !== []) {
+            echo "\nManifest validation errors detected: " . count($this->registry->errors()) . "\n";
+            echo "Run: blackcat verify --json\n";
+        }
+
+        echo "\nSet BLACKCAT_CLI_CONFIG or pass --cli-config to point at another CLI config file.\n";
         return 0;
     }
 
@@ -128,15 +162,33 @@ final class BlackCatCli
     /**
      * @param string[] $args
      */
-    private function runConfiguredCommand(string $command, array $args): int
+    private function runAnyCommand(string $command, array $args): int
     {
         try {
             $spec = $this->config->command($command);
-        } catch (InvalidArgumentException $e) {
+            $cmd = array_merge([$spec['runner'], $spec['script']], $spec['args'], $args);
+            return $this->runProcess($cmd);
+        } catch (InvalidArgumentException) {
+            // fall through
+        }
+
+        $dynamic = $this->registry->find($command);
+        if ($dynamic === null) {
             return $this->unknown($command);
         }
 
-        $cmd = array_merge([$spec['runner'], $spec['script']], $spec['args'], $args);
+        if ($dynamic->isBuiltin()) {
+            return $this->runBuiltin($dynamic, $args);
+        }
+
+        $runner = $dynamic->runner() ?? 'php';
+        $script = $dynamic->script();
+        if (!is_string($script) || $script === '') {
+            fwrite(STDERR, "Invalid proxy spec for '{$command}': missing script.\n");
+            return 1;
+        }
+
+        $cmd = array_merge([$runner, $script], $dynamic->args(), $args);
         return $this->runProcess($cmd);
     }
 
@@ -146,17 +198,22 @@ final class BlackCatCli
     private function runStatus(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
+        $remaining = self::stripRuntimeConfigArgs($remaining);
         if ($remaining !== []) {
             fwrite(STDERR, 'status does not accept additional arguments' . PHP_EOL);
             return 1;
         }
 
-        $checker = new IntegrationChecker($this->config);
+        $checker = new IntegrationChecker($this->config, $this->registry);
         $results = $checker->inspect();
 
         if ($json) {
             echo json_encode([
                 'workspace' => $this->config->workspaceRoot(),
+                'manifest_errors' => array_map(
+                    static fn ($e): array => ['manifest' => $e->manifestPath(), 'message' => $e->message()],
+                    $checker->manifestErrors()
+                ),
                 'commands' => $results,
             ], JSON_PRETTY_PRINT) . PHP_EOL;
             return 0;
@@ -178,21 +235,28 @@ final class BlackCatCli
     private function runVerify(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
+        $remaining = self::stripRuntimeConfigArgs($remaining);
         if ($remaining !== []) {
             fwrite(STDERR, 'verify does not accept additional arguments' . PHP_EOL);
             return 1;
         }
 
-        $checker = new IntegrationChecker($this->config);
+        $checker = new IntegrationChecker($this->config, $this->registry);
         $results = $checker->inspect();
         $violations = array_values(array_filter(
             $results,
             static fn (array $row): bool => !$row['exists'] || !$row['allowed']
         ));
 
+        $manifestErrors = $checker->manifestErrors();
+
         if ($json) {
             echo json_encode([
                 'workspace' => $this->config->workspaceRoot(),
+                'manifest_errors' => array_map(
+                    static fn ($e): array => ['manifest' => $e->manifestPath(), 'message' => $e->message()],
+                    $manifestErrors
+                ),
                 'violations' => $violations,
                 'commands' => $results,
             ], JSON_PRETTY_PRINT) . PHP_EOL;
@@ -204,8 +268,12 @@ final class BlackCatCli
             }
         }
 
-        if ($violations !== []) {
-            fwrite(STDERR, 'Integration check failed for ' . count($violations) . ' command(s).' . PHP_EOL);
+        if ($manifestErrors !== []) {
+            fwrite(STDERR, 'Manifest validation failed for ' . count($manifestErrors) . ' file(s).' . PHP_EOL);
+        }
+
+        if ($violations !== [] || $manifestErrors !== []) {
+            fwrite(STDERR, 'Integration check failed.' . PHP_EOL);
             return 2;
         }
 
@@ -249,6 +317,103 @@ final class BlackCatCli
             return 1;
         }
 
-        return proc_close($process) ?? 0;
+        return proc_close($process);
+    }
+
+    /**
+     * Builtin commands discovered by manifest.
+     *
+     * @param string[] $args
+     */
+    private function runBuiltin(CommandSpec $spec, array $args): int
+    {
+        return match ($spec->command()) {
+            'db-crypto' => $this->runDbCrypto($args),
+            default => $this->unknownBuiltin($spec->command()),
+        };
+    }
+
+    private function unknownBuiltin(string $command): int
+    {
+        fwrite(STDERR, "Builtin command '{$command}' is not implemented in blackcat-cli.\n");
+        return 1;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runDbCrypto(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+        $rest = array_slice($args, 1);
+
+        $cliRoot = dirname(__DIR__);
+        $libexec = $cliRoot . '/libexec';
+
+        $script = match ($sub) {
+            'help', '--help', '-h' => null,
+            'plan' => $libexec . '/db-crypto-plan',
+            'health' => $libexec . '/db-crypto-health',
+            'stress' => $libexec . '/db-crypto-stress',
+            'telemetry' => $libexec . '/db-crypto-telemetry',
+            'schema' => $libexec . '/db-crypto-schema',
+            'keys-sync', 'keys' => $libexec . '/db-crypto-keys-sync',
+            default => '',
+        };
+
+        if ($script === null) {
+            echo "db-crypto\n";
+            echo "Usage: blackcat db-crypto <subcommand> [args...]\n\n";
+            echo "Subcommands:\n";
+            echo "  plan         Validate encryption map vs schema/manifest\n";
+            echo "  health       Crypto roundtrip + fallback smoke checks\n";
+            echo "  stress       Stress test for encryption/hmac paths\n";
+            echo "  telemetry    Generate map metrics summary\n";
+            echo "  schema       Build schema snapshot (JSON)\n";
+            echo "  keys-sync    Sync key inventory into DB\n";
+            echo "\nExamples:\n";
+            echo "  blackcat db-crypto telemetry --out=telemetry/db-crypto-metrics.json\n";
+            echo "  blackcat db-crypto stress --iterations=20000 --out=telemetry/db-crypto-stress.json\n";
+            echo "  blackcat db-crypto health --generate-keys=1 --max-contexts=25\n";
+            return 0;
+        }
+
+        if ($script === '' || !is_file($script)) {
+            fwrite(STDERR, "db-crypto subcommand not found: {$sub}\n");
+            return 1;
+        }
+
+        $cmd = array_merge([PHP_BINARY, $script], $rest);
+        return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     * @return string[]
+     */
+    private static function stripRuntimeConfigArgs(array $args): array
+    {
+        $filtered = [];
+        $skipNext = false;
+
+        foreach ($args as $arg) {
+            if ($skipNext) {
+                $skipNext = false;
+                continue;
+            }
+
+            if ($arg === '--config' || $arg === '--config-file') {
+                $skipNext = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--config=') || str_starts_with($arg, '--config-file=')) {
+                continue;
+            }
+
+            $filtered[] = $arg;
+        }
+
+        return $filtered;
     }
 }

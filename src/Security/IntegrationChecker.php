@@ -5,10 +5,15 @@ declare(strict_types=1);
 namespace BlackCat\Cli\Security;
 
 use BlackCat\Cli\Config\CliConfig;
+use BlackCat\Cli\Manifest\CommandRegistry;
+use BlackCat\Cli\Manifest\ManifestError;
 
 final class IntegrationChecker
 {
-    public function __construct(private readonly CliConfig $config)
+    public function __construct(
+        private readonly CliConfig $config,
+        private readonly CommandRegistry $registry
+    )
     {
     }
 
@@ -19,7 +24,9 @@ final class IntegrationChecker
     {
         $results = [];
 
-        foreach ($this->config->commands() as $name => $definition) {
+        $configCommands = $this->config->commands();
+
+        foreach ($configCommands as $name => $definition) {
             $script = $definition['script'];
             $resolved = realpath($script) ?: null;
             $exists = $resolved !== null && is_file($resolved);
@@ -35,7 +42,47 @@ final class IntegrationChecker
             ];
         }
 
+        foreach ($this->registry->commands() as $name => $spec) {
+            if (isset($configCommands[$name])) {
+                continue;
+            }
+
+            if ($spec->isBuiltin()) {
+                $results[] = [
+                    'command' => $name,
+                    'runner' => 'builtin',
+                    'script' => '(builtin)',
+                    'resolved' => null,
+                    'exists' => true,
+                    'allowed' => true,
+                ];
+                continue;
+            }
+
+            $script = (string) ($spec->script() ?? '');
+            $resolved = realpath($script) ?: null;
+            $exists = $resolved !== null && is_file($resolved);
+            $allowed = $exists ? $this->isAllowed($resolved) : false;
+
+            $results[] = [
+                'command' => $name,
+                'runner' => (string) ($spec->runner() ?? 'php'),
+                'script' => $script,
+                'resolved' => $resolved,
+                'exists' => $exists,
+                'allowed' => $allowed,
+            ];
+        }
+
         return $results;
+    }
+
+    /**
+     * @return ManifestError[]
+     */
+    public function manifestErrors(): array
+    {
+        return $this->registry->errors();
     }
 
     /**
@@ -47,6 +94,10 @@ final class IntegrationChecker
             if (!$row['exists'] || !$row['allowed']) {
                 return true;
             }
+        }
+
+        if ($this->registry->errors() !== []) {
+            return true;
         }
 
         return false;

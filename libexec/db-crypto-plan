@@ -1,0 +1,208 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\DatabaseCrypto\Config\EncryptionMap;
+use BlackCat\DatabaseCrypto\Config\PackagesEncryptionMapLoader;
+use BlackCat\DatabaseCrypto\Diagnostics\BlackcatDatabaseSchemaCatalog;
+use BlackCat\DatabaseCrypto\Diagnostics\EncryptionPlanValidator;
+use BlackCat\DatabaseCrypto\Diagnostics\SchemaSnapshot;
+use BlackCat\DatabaseCrypto\Diagnostics\SchemaSnapshotBuilder;
+use BlackCat\Core\Database;
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+
+require __DIR__ . '/bootstrap.php';
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+initRuntimeConfig($options);
+
+try {
+    $mapPath = (string)($options['map'] ?? ($positionals[0] ?? ''));
+    $mapLabel = $mapPath !== '' ? $mapPath : 'packages';
+
+    if ($mapPath !== '') {
+        $map = EncryptionMap::fromFile($mapPath);
+    } else {
+        $root = isset($options['blackcat-db-root']) && is_string($options['blackcat-db-root']) && $options['blackcat-db-root'] !== ''
+            ? (string)$options['blackcat-db-root']
+            : null;
+        $map = $root !== null
+            ? PackagesEncryptionMapLoader::fromBlackcatDatabaseRoot($root)
+            : PackagesEncryptionMapLoader::fromAutodetectedBlackcatDatabaseRoot();
+    }
+
+    $tablesFilter = [];
+    if (isset($options['tables']) && is_string($options['tables']) && trim($options['tables']) !== '') {
+        $tablesFilter = array_values(array_filter(array_map('trim', explode(',', (string)$options['tables'])), static fn($s) => $s !== ''));
+    }
+    if ($tablesFilter !== []) {
+        $wanted = array_fill_keys(array_map('strtolower', $tablesFilter), true);
+        $all = $map->all();
+        $subset = [];
+        foreach ($all as $t => $cols) {
+            $tk = strtolower((string)$t);
+            if (isset($wanted[$tk])) {
+                $subset[$tk] = $cols;
+                unset($wanted[$tk]);
+            }
+        }
+        if ($wanted !== []) {
+            throw new RuntimeException('Unknown table(s) in --tables: ' . implode(', ', array_keys($wanted)));
+        }
+        $wrapped = [];
+        foreach ($subset as $t => $cols) {
+            $wrapped[(string)$t] = ['columns' => $cols];
+        }
+        $map = EncryptionMap::fromArray(['tables' => $wrapped]);
+    }
+    $manifestContexts = loadManifestContexts(resolveManifestPath($options));
+
+    $schemaSource = strtolower((string)($options['schema-source'] ?? ''));
+    $schemaPath = (string)($options['schema'] ?? '');
+    $dsn = (string)($options['dsn'] ?? '');
+    $dbSchema = $options['db-schema'] ?? null;
+
+    $schemaSnapshot = null;
+    if ($schemaPath !== '') {
+        $schemaSnapshot = SchemaSnapshot::fromJsonFile($schemaPath);
+    } elseif ($schemaSource === 'packages') {
+        $root = isset($options['blackcat-db-root']) && is_string($options['blackcat-db-root']) && $options['blackcat-db-root'] !== ''
+            ? (string)$options['blackcat-db-root']
+            : null;
+        $catalog = $root ? BlackcatDatabaseSchemaCatalog::fromRoot($root) : BlackcatDatabaseSchemaCatalog::fromAutodetectedRoot();
+        $schemaSnapshot = $catalog->snapshot(array_keys($map->all()));
+    } elseif ($dsn !== '') {
+        Database::init([
+            'dsn' => $dsn,
+            'user' => getenv('DB_USER') ?: null,
+            'pass' => getenv('DB_PASSWORD') ?: null,
+        ]);
+        $db = Database::getInstance();
+        $schemaSnapshot = SchemaSnapshotBuilder::forDatabase($db, $db->dialect(), is_string($dbSchema) && $dbSchema !== '' ? $dbSchema : null)
+            ->build(array_keys($map->all()));
+    }
+
+    echo "Encryption plan for {$mapLabel}\n";
+    $report = EncryptionPlanValidator::validate($map, $manifestContexts, $schemaSnapshot);
+
+    foreach ($report['tables'] as $table => $t) {
+        $tStatus = implode(',', $t['status']);
+        echo "- {$table} [{$tStatus}]\n";
+        foreach ($t['columns'] as $column => $c) {
+            $ctx = $c['context'] ?? '(none)';
+            echo sprintf(
+                "    • %-20s %-12s %-28s [%s]\n",
+                $column,
+                $c['strategy'],
+                $ctx,
+                implode(',', $c['status'])
+            );
+        }
+    }
+
+    if ($manifestContexts !== []) {
+        echo sprintf("\nManifest contexts loaded (%d)\n", count($manifestContexts));
+    } else {
+        echo "\nManifest contexts not loaded (set runtime config crypto.manifest or --manifest=path).\n";
+    }
+
+    if ($schemaSnapshot !== null) {
+        if ($schemaPath !== '') {
+            echo "Schema validation enabled (snapshot file).\n";
+        } elseif ($schemaSource === 'packages') {
+            echo "Schema validation enabled (blackcat-database packages).\n";
+        } elseif ($dsn !== '') {
+            echo "Schema validation enabled (live DB).\n";
+        } else {
+            echo "Schema validation enabled.\n";
+        }
+    } else {
+        echo "Schema validation disabled (pass --schema=path.json, --schema-source=packages or --dsn=...).\n";
+    }
+
+    exit($report['hasWarnings'] ? 2 : 0);
+} catch (Throwable $e) {
+    fwrite(STDERR, "db-crypto-plan failed: " . $e->getMessage() . "\n");
+    exit(1);
+}
+
+/**
+ * @param list<string> $args
+ * @return array{0:array<string,string>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    $options = [];
+    $positionals = [];
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, '--')) {
+            [$key, $value] = array_pad(explode('=', substr($arg, 2), 2), 2, '1');
+            $options[$key] = $value;
+            continue;
+        }
+        $positionals[] = $arg;
+    }
+    return [$options, $positionals];
+}
+
+/**
+ * @return list<string>
+ */
+function loadManifestContexts(string $path): array
+{
+    if ($path === '' || !is_file($path)) {
+        return [];
+    }
+    $contents = file_get_contents($path);
+    if ($contents === false) {
+        return [];
+    }
+    $json = json_decode($contents, true);
+    if (!is_array($json) || !isset($json['slots']) || !is_array($json['slots'])) {
+        return [];
+    }
+    return array_keys($json['slots']);
+}
+
+/**
+ * Initialize blackcat-config runtime config for CLI tools.
+ *
+ * @param array<string,string> $options
+ */
+function initRuntimeConfig(array $options): void
+{
+    $cfg = $options['config'] ?? ($options['config-file'] ?? null);
+    if ($cfg === '1') {
+        $cfg = '';
+    }
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveManifestPath(array $options): string
+{
+    $opt = $options['manifest'] ?? '';
+    if ($opt === '1') {
+        $opt = '';
+    }
+    if (is_string($opt) && trim($opt) !== '') {
+        return trim($opt);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('crypto.manifest');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+    }
+
+    return '';
+}

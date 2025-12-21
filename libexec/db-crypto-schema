@@ -1,0 +1,98 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Core\Database;
+use BlackCat\DatabaseCrypto\Config\EncryptionMap;
+use BlackCat\DatabaseCrypto\Diagnostics\BlackcatDatabaseSchemaCatalog;
+use BlackCat\DatabaseCrypto\Diagnostics\SchemaSnapshotBuilder;
+
+require __DIR__ . '/bootstrap.php';
+
+[$options, $positionals] = parseArgs(array_slice($argv, 1));
+
+$source = strtolower((string)($options['source'] ?? ''));
+$dsn = (string)($options['dsn'] ?? '');
+$pos0 = (string)($positionals[0] ?? '');
+if ($dsn === '' && preg_match('~^(mysql|pgsql|sqlite):~i', $pos0)) {
+    $dsn = $pos0;
+}
+
+$output = $options['out'] ?? null;
+if ($output === null) {
+    $output = $dsn !== ''
+        ? ($positionals[1] ?? null) // db-crypto-schema <dsn> [output.json]
+        : ($positionals[0] ?? null); // db-crypto-schema [output.json]
+}
+$schema = $options['db-schema'] ?? null;
+
+if ($source === '') {
+    $source = $dsn !== '' ? 'db' : 'packages';
+}
+if (!in_array($source, ['db', 'packages'], true)) {
+    fwrite(STDERR, "db-crypto-schema: invalid --source (expected db|packages)\n");
+    exit(1);
+}
+if ($source === 'db' && $dsn === '') {
+    fwrite(STDERR, "db-crypto-schema: --source=db requires --dsn=...\n");
+    exit(1);
+}
+
+$tables = null;
+if (isset($options['map']) && is_string($options['map']) && $options['map'] !== '') {
+    $map = EncryptionMap::fromFile($options['map']);
+    $tables = array_keys($map->all());
+}
+if (isset($options['tables']) && is_string($options['tables']) && $options['tables'] !== '') {
+    $tables = array_values(array_filter(array_map('trim', explode(',', $options['tables'])), static fn($s) => $s !== ''));
+}
+
+try {
+    if ($source === 'db') {
+        Database::init([
+            'dsn' => $dsn,
+            'user' => getenv('DB_USER') ?: null,
+            'pass' => getenv('DB_PASSWORD') ?: null,
+        ]);
+        $db = Database::getInstance();
+
+        $snapshot = SchemaSnapshotBuilder::forDatabase($db, $db->dialect(), is_string($schema) && $schema !== '' ? $schema : null)
+            ->build($tables);
+    } else {
+        $root = isset($options['blackcat-db-root']) && is_string($options['blackcat-db-root']) && $options['blackcat-db-root'] !== ''
+            ? (string)$options['blackcat-db-root']
+            : null;
+        $catalog = $root ? BlackcatDatabaseSchemaCatalog::fromRoot($root) : BlackcatDatabaseSchemaCatalog::fromAutodetectedRoot();
+        $snapshot = $catalog->snapshot($tables);
+    }
+    $json = $snapshot->toJson();
+
+    if (is_string($output) && $output !== '') {
+        file_put_contents($output, $json . PHP_EOL);
+        echo "Schema snapshot written to {$output}\n";
+    } else {
+        echo $json . PHP_EOL;
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, "db-crypto-schema failed: " . $e->getMessage() . "\n");
+    exit(1);
+}
+
+/**
+ * @param list<string> $args
+ * @return array{0:array<string,string>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    $options = [];
+    $positionals = [];
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, '--')) {
+            [$key, $value] = array_pad(explode('=', substr($arg, 2), 2), 2, '1');
+            $options[$key] = $value;
+            continue;
+        }
+        $positionals[] = $arg;
+    }
+    return [$options, $positionals];
+}

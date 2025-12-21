@@ -1,0 +1,805 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Crypto\Config\CryptoConfig;
+use BlackCat\Crypto\CryptoManager;
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+use BlackCat\DatabaseCrypto\Adapter\DatabaseCryptoAdapter;
+use BlackCat\DatabaseCrypto\Config\EncryptionMap;
+use BlackCat\DatabaseCrypto\Config\PackagesEncryptionMapLoader;
+use BlackCat\DatabaseCrypto\Gateway\DatabaseGatewayInterface;
+use BlackCat\DatabaseCrypto\Ingress\DatabaseIngressAdapter;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * Load/stress test for the packages encryption map + ingress transforms.
+ *
+ * Usage:
+ *   blackcat db-crypto stress [--blackcat-db-root=DIR] [--tables=a,b] [--iterations=N] [--out=FILE]
+ *                         [--key-versions=N] [--keys-dir=DIR] [--generate-keys=1] [--config=/path/to/config.json]
+ *
+ * Notes:
+ * - Does not require a DB connection (transform-only).
+ * - Uses runtime config crypto.keys_dir by default (or --keys-dir when runtime config is not initialized).
+ * - Ephemeral keys are generated only when --generate-keys=1 is used.
+ * - Includes decrypt + fallback + basic HMAC verification (rotation-safe).
+ */
+
+function usage(): void
+{
+    fwrite(
+        STDERR,
+        "Usage: db-crypto-stress [--blackcat-db-root=DIR] [--tables=a,b] [--iterations=N] [--out=FILE] [--key-versions=N]\n"
+        . "                       [--keys-dir=DIR] [--generate-keys=1] [--config=/path/to/config.json]\n"
+    );
+    exit(1);
+}
+
+/**
+ * @param list<string> $args
+ * @return array<string,string>
+ */
+function parseArgs(array $args): array
+{
+    $options = [];
+    foreach ($args as $arg) {
+        if (!str_starts_with($arg, '--')) {
+            continue;
+        }
+        [$key, $value] = array_pad(explode('=', substr($arg, 2), 2), 2, '1');
+        $options[$key] = $value;
+    }
+    return $options;
+}
+
+function optString(array $options, string $key): ?string
+{
+    $v = $options[$key] ?? null;
+    if (!is_string($v)) {
+        return null;
+    }
+    $v = trim($v);
+    return $v !== '' ? $v : null;
+}
+
+function optInt(array $options, string $key, int $default): int
+{
+    $v = $options[$key] ?? null;
+    if (is_int($v)) {
+        return $v;
+    }
+    if (!is_string($v) || trim($v) === '') {
+        return $default;
+    }
+    if (!preg_match('~^-?\\d+$~', $v)) {
+        return $default;
+    }
+    return (int)$v;
+}
+
+function optBool(array $options, string $key, bool $default = false): bool
+{
+    $v = $options[$key] ?? null;
+    if ($v === null) {
+        return $default;
+    }
+    if ($v === true) {
+        return true;
+    }
+    if ($v === false) {
+        return false;
+    }
+    if (!is_string($v)) {
+        return $default;
+    }
+    $v = strtolower(trim($v));
+    if ($v === '' || $v === '1' || $v === 'true' || $v === 'yes' || $v === 'on') {
+        return true;
+    }
+    if ($v === '0' || $v === 'false' || $v === 'no' || $v === 'off') {
+        return false;
+    }
+    return $default;
+}
+
+/**
+ * @return list<string>
+ */
+function collectContexts(EncryptionMap $map): array
+{
+    $set = [];
+    foreach ($map->all() as $table => $columns) {
+        if (!is_array($columns)) {
+            continue;
+        }
+        foreach ($columns as $spec) {
+            if (!is_array($spec)) {
+                continue;
+            }
+            $strategy = strtolower((string)($spec['strategy'] ?? ''));
+            if ($strategy !== 'encrypt' && $strategy !== 'hmac') {
+                continue;
+            }
+            $ctx = (string)($spec['context'] ?? '');
+            $ctx = trim($ctx);
+            if ($ctx !== '') {
+                $set[$ctx] = true;
+            }
+        }
+    }
+    $out = array_keys($set);
+    sort($out);
+    return $out;
+}
+
+function keyFileBase(string $context): string
+{
+    $base = strtolower(str_replace('.', '_', $context));
+    $base = preg_replace('~[^a-z0-9_.-]+~', '_', $base) ?: 'key';
+    return $base;
+}
+
+function keyIdForContext(string $context, int $version): string
+{
+    return keyFileBase($context) . '_v' . $version . '.key';
+}
+
+function keyHexPath(string $keysDir, string $context, int $version): string
+{
+    return rtrim($keysDir, '/\\') . '/' . keyFileBase($context) . '_v' . $version . '.hex';
+}
+
+function writeHexKey(string $keysDir, string $context, int $version): void
+{
+    $bytes = hash('sha256', $context . '|v' . $version, true);
+    $hex = bin2hex($bytes);
+    $path = keyHexPath($keysDir, $context, $version);
+    file_put_contents($path, $hex . PHP_EOL);
+    @chmod($path, 0600);
+}
+
+/**
+ * @param list<string> $contexts
+ */
+function generateKeys(string $keysDir, array $contexts, int $versions): void
+{
+    if ($versions < 1) {
+        $versions = 1;
+    }
+    foreach ($contexts as $ctx) {
+        for ($v = 1; $v <= $versions; $v++) {
+            writeHexKey($keysDir, $ctx, $v);
+        }
+    }
+}
+
+/**
+ * @return array{
+ *   encrypt_cases:list<array{
+ *     table:string,
+ *     payload:array<string,mixed>,
+ *     expected:array<string,string>,
+ *     encrypt_columns:list<array{column:string,context:string}>,
+ *     hmac_columns:list<array{column:string,context:string,encoding:string,key_version_column:?string,message:string}>
+ *   }>,
+ *   criteria_cases:list<array{table:string,criteria:array<string,mixed>}>,
+ *   strategy_counts:array<string,int>
+ * }
+ */
+function buildCases(EncryptionMap $map): array
+{
+    $encryptCases = [];
+    $criteriaCases = [];
+    $strategyCounts = ['encrypt' => 0, 'hmac' => 0, 'passthrough' => 0, 'other' => 0];
+
+    foreach ($map->all() as $table => $columns) {
+        if (!is_array($columns)) {
+            continue;
+        }
+
+        $encryptPayload = [];
+        $criteriaPayload = [];
+        $expected = [];
+        $encryptColumns = [];
+        $hmacColumns = [];
+
+        foreach ($columns as $column => $spec) {
+            if (!is_array($spec)) {
+                continue;
+            }
+
+            $strategy = strtolower((string)($spec['strategy'] ?? ''));
+            if (isset($strategyCounts[$strategy])) {
+                $strategyCounts[$strategy]++;
+            } else {
+                $strategyCounts['other']++;
+            }
+
+            if ($strategy === 'encrypt') {
+                // Keep cases lightweight: only one encrypt column per table is enough.
+                if ($encryptColumns !== []) {
+                    continue;
+                }
+                $ctx = (string)($spec['context'] ?? '');
+                if (trim($ctx) === '') {
+                    continue;
+                }
+                $value = [
+                    'table' => (string)$table,
+                    'column' => (string)$column,
+                    'email' => 'alice@example.com',
+                    'ts' => time(),
+                ];
+                $encryptPayload[(string)$column] = $value;
+                $expected[(string)$column] = json_encode($value, JSON_UNESCAPED_SLASHES) ?: '';
+                $encryptColumns[] = ['column' => (string)$column, 'context' => $ctx];
+                continue;
+            }
+
+            if ($strategy === 'hmac') {
+                // Keep cases lightweight: only one HMAC column per table is enough.
+                if ($hmacColumns !== []) {
+                    continue;
+                }
+                $ctx = (string)($spec['context'] ?? '');
+                if (trim($ctx) === '') {
+                    continue;
+                }
+                $msg = (string)$table . '.' . (string)$column . ':alice@example.com';
+                $encryptPayload[(string)$column] = $msg;
+                $criteriaPayload[(string)$column] = $msg;
+                $enc = (string)($spec['encoding'] ?? 'raw');
+                $kvc = $spec['key_version_column'] ?? null;
+                $hmacColumns[] = [
+                    'column' => (string)$column,
+                    'context' => $ctx,
+                    'encoding' => $enc !== '' ? $enc : 'raw',
+                    'key_version_column' => is_string($kvc) && $kvc !== '' ? (string)$kvc : null,
+                    'message' => $msg,
+                ];
+                continue;
+            }
+        }
+
+        if ($encryptPayload !== []) {
+            $encryptCases[] = [
+                'table' => (string)$table,
+                'payload' => $encryptPayload,
+                'expected' => $expected,
+                'encrypt_columns' => $encryptColumns,
+                'hmac_columns' => $hmacColumns,
+            ];
+        }
+        if ($criteriaPayload !== []) {
+            $criteriaCases[] = ['table' => (string)$table, 'criteria' => $criteriaPayload];
+        }
+    }
+
+    return [
+        'encrypt_cases' => $encryptCases,
+        'criteria_cases' => $criteriaCases,
+        'strategy_counts' => $strategyCounts,
+    ];
+}
+
+function decodeHmacSignature(string $encoded, string $encoding): string
+{
+    $enc = strtolower(trim($encoding));
+    $enc = match ($enc) {
+        'bin', 'binary' => 'raw',
+        'b64' => 'base64',
+        default => $enc,
+    };
+
+    if ($enc === '' || $enc === 'raw') {
+        return $encoded;
+    }
+    if ($enc === 'hex') {
+        $bytes = hex2bin($encoded);
+        if ($bytes === false) {
+            throw new RuntimeException('Invalid hex signature');
+        }
+        return $bytes;
+    }
+    if ($enc === 'base64') {
+        $bytes = base64_decode($encoded, true);
+        if ($bytes === false) {
+            throw new RuntimeException('Invalid base64 signature');
+        }
+        return $bytes;
+    }
+
+    throw new RuntimeException('Unknown HMAC encoding: ' . $encoding);
+}
+
+function tamperEnvelopeKeyId(string $serializedEnvelope, string $newKeyId): string
+{
+    $decoded = json_decode($serializedEnvelope, true);
+    if (!is_array($decoded) || !isset($decoded['local']) || !is_array($decoded['local'])) {
+        throw new RuntimeException('Invalid envelope JSON');
+    }
+    $decoded['local']['keyId'] = $newKeyId;
+    $json = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        throw new RuntimeException('Unable to encode envelope JSON');
+    }
+    return $json;
+}
+
+function pickAlternateKeyId(CryptoManager $crypto, string $context, string $currentKeyId): ?string
+{
+    $materials = $crypto->allKeyMaterial($context);
+    foreach ($materials as $mat) {
+        if ($mat->id !== $currentKeyId) {
+            return $mat->id;
+        }
+    }
+    return null;
+}
+
+function cleanupDir(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+    foreach (glob(rtrim($dir, '/\\') . '/*') ?: [] as $file) {
+        @unlink($file);
+    }
+    @rmdir($dir);
+}
+
+try {
+    $options = parseArgs(array_slice($argv, 1));
+
+    if (isset($options['help']) || isset($options['h'])) {
+        usage();
+    }
+
+    $generateKeys = optBool($options, 'generate-keys', false);
+    initRuntimeConfig($options, !$generateKeys);
+
+    $iterations = optInt($options, 'iterations', 20_000);
+    if ($iterations < 1) {
+        throw new RuntimeException('--iterations must be >= 1');
+    }
+
+    $keyVersions = optInt($options, 'key-versions', 2);
+    if ($keyVersions < 1) {
+        $keyVersions = 1;
+    }
+
+    $root = optString($options, 'blackcat-db-root');
+    $map = $root !== null
+        ? PackagesEncryptionMapLoader::fromBlackcatDatabaseRoot($root)
+        : PackagesEncryptionMapLoader::fromAutodetectedBlackcatDatabaseRoot();
+
+    $tablesFilter = [];
+    if (isset($options['tables']) && is_string($options['tables']) && trim($options['tables']) !== '') {
+        $tablesFilter = array_values(array_filter(array_map('trim', explode(',', (string)$options['tables'])), static fn($s) => $s !== ''));
+    }
+    if ($tablesFilter !== []) {
+        $wanted = array_fill_keys(array_map('strtolower', $tablesFilter), true);
+        $all = $map->all();
+        $subset = [];
+        foreach ($all as $t => $cols) {
+            $tk = strtolower((string)$t);
+            if (isset($wanted[$tk])) {
+                $subset[$tk] = $cols;
+                unset($wanted[$tk]);
+            }
+        }
+        if ($wanted !== []) {
+            throw new RuntimeException('Unknown table(s) in --tables: ' . implode(', ', array_keys($wanted)));
+        }
+        $wrapped = [];
+        foreach ($subset as $t => $cols) {
+            $wrapped[(string)$t] = ['columns' => $cols];
+        }
+        $map = EncryptionMap::fromArray(['tables' => $wrapped]);
+    }
+
+    $contexts = collectContexts($map);
+    if ($contexts === []) {
+        throw new RuntimeException('No encrypt/hmac contexts found in the packages map (nothing to stress).');
+    }
+
+    $generatedKeys = false;
+    if ($generateKeys) {
+        $keysDir = sys_get_temp_dir() . '/bcat-dbcrypto-stress-keys-' . bin2hex(random_bytes(5));
+        if (!is_dir($keysDir) && !mkdir($keysDir, 0700, true) && !is_dir($keysDir)) {
+            throw new RuntimeException('Cannot create temp keys dir: ' . $keysDir);
+        }
+        @chmod($keysDir, 0700);
+        $generatedKeys = true;
+    } else {
+        $keysDir = resolveKeysDir($options);
+        if ($keysDir === null) {
+            throw new RuntimeException('Missing crypto keys dir (set runtime config crypto.keys_dir or pass --keys-dir=DIR, or use --generate-keys=1).');
+        }
+    }
+
+    if (!is_dir($keysDir)) {
+        throw new RuntimeException('Keys dir not found: ' . $keysDir);
+    }
+
+    if ($generatedKeys) {
+        // Phase 1: v1 only (rotation baseline).
+        generateKeys($keysDir, $contexts, 1);
+    }
+
+    // Force local-only KMS for deterministic stress results.
+    $env = [
+        'BLACKCAT_KMS_ENDPOINTS' => '[]',
+    ];
+    if (!RuntimeConfig::isInitialized()) {
+        $env['BLACKCAT_KEYS_DIR'] = $keysDir;
+    }
+    $crypto = CryptoManager::boot(CryptoConfig::fromEnv($env));
+
+    $nullGateway = new class implements DatabaseGatewayInterface {
+        public function insert(string $table, array $payload, array $options = []): mixed { return true; }
+        public function update(string $table, array $payload, array $criteria, array $options = []): mixed { return true; }
+    };
+
+    $adapter = new DatabaseCryptoAdapter($crypto, $map, $nullGateway);
+    $ingress = new DatabaseIngressAdapter($adapter, $map, true);
+
+    $cases = buildCases($map);
+    $encryptCases = $cases['encrypt_cases'];
+    $criteriaCases = $cases['criteria_cases'];
+    $strategyCounts = $cases['strategy_counts'];
+
+    if ($encryptCases === [] && $criteriaCases === []) {
+        throw new RuntimeException('No runnable encrypt/criteria cases produced from the packages map.');
+    }
+
+    $checks = [
+        'rotation_ok' => null,
+        'roundtrip_ok' => null,
+        'fallback_ok' => null,
+        'wrong_key_fail_ok' => null,
+    ];
+
+    // Rotation baseline: encrypt once with v1-only keys, then add v2..vN and verify decrypt still works.
+    $rotationBaseline = null;
+    if ($generatedKeys && $keyVersions >= 2) {
+        foreach ($encryptCases as $c) {
+            if (($c['encrypt_columns'] ?? []) === []) {
+                continue;
+            }
+            $rotationBaseline = [
+                'table' => $c['table'],
+                'expected' => $c['expected'],
+                'encrypted' => $ingress->encrypt($c['table'], $c['payload']),
+            ];
+            break;
+        }
+    }
+
+    // Rotation: add v2..vN keys after we already booted crypto (resolver reads filesystem on demand).
+    if ($generatedKeys && $keyVersions >= 2) {
+        foreach ($contexts as $ctx) {
+            for ($v = 2; $v <= $keyVersions; $v++) {
+                writeHexKey($keysDir, $ctx, $v);
+            }
+        }
+    }
+
+    if (is_array($rotationBaseline)) {
+        $rotationOk = true;
+        $decrypted = $ingress->decrypt($rotationBaseline['table'], $rotationBaseline['encrypted']);
+        foreach ($rotationBaseline['expected'] as $colName => $expectedPlain) {
+            if (($decrypted[$colName] ?? null) !== $expectedPlain) {
+                $rotationOk = false;
+                break;
+            }
+        }
+        $checks['rotation_ok'] = $rotationOk;
+    }
+
+    // Self-check: one encrypt roundtrip (and fallback + wrong-key failure if possible).
+    $first = $encryptCases[0] ?? null;
+    $firstEncrypt = null;
+    foreach ($encryptCases as $c) {
+        if (($c['encrypt_columns'] ?? []) !== []) {
+            $firstEncrypt = $c;
+            break;
+        }
+    }
+    $checkCase = $firstEncrypt ?? $first;
+    if (is_array($checkCase)) {
+        $enc = $ingress->encrypt($checkCase['table'], $checkCase['payload']);
+        $roundtripOk = true;
+        if (($checkCase['encrypt_columns'] ?? []) !== []) {
+            foreach ($checkCase['encrypt_columns'] as $col) {
+                $colName = (string)($col['column'] ?? '');
+                $cipher = (string)($enc[$colName] ?? '');
+                if ($cipher === '' || !str_starts_with($cipher, '{') || str_contains($cipher, 'alice@example.com')) {
+                    $roundtripOk = false;
+                    break;
+                }
+            }
+        }
+        $dec = $ingress->decrypt($checkCase['table'], $enc);
+        foreach (($checkCase['expected'] ?? []) as $colName => $expectedPlain) {
+            if (($dec[$colName] ?? null) !== $expectedPlain) {
+                $roundtripOk = false;
+                break;
+            }
+        }
+        $checks['roundtrip_ok'] = $roundtripOk;
+
+        $fallbackOk = null;
+        if (($checkCase['encrypt_columns'] ?? []) !== []) {
+            $firstEncCol = $checkCase['encrypt_columns'][0];
+            $colName = (string)$firstEncCol['column'];
+            $ctx = (string)$firstEncCol['context'];
+            $envJson = (string)($enc[$colName] ?? '');
+            $envDecoded = json_decode($envJson, true);
+            $currentKeyId = is_array($envDecoded) && is_array($envDecoded['local'] ?? null)
+                ? (string)($envDecoded['local']['keyId'] ?? '')
+                : '';
+            if ($currentKeyId !== '') {
+                $alt = pickAlternateKeyId($crypto, $ctx, $currentKeyId);
+                if (is_string($alt) && $alt !== '') {
+                    $tampered = $enc;
+                    $tampered[$colName] = tamperEnvelopeKeyId($envJson, $alt);
+                    $dec2 = $ingress->decrypt($checkCase['table'], $tampered);
+                    $fallbackOk = ($dec2[$colName] ?? null) === ($checkCase['expected'][$colName] ?? null);
+                }
+            }
+        }
+        $checks['fallback_ok'] = $fallbackOk;
+
+        $wrongKeyOk = null;
+        if ($generatedKeys && ($checkCase['encrypt_columns'] ?? []) !== []) {
+            $firstEncCol = $checkCase['encrypt_columns'][0];
+            $colName = (string)$firstEncCol['column'];
+            $ctx = (string)$firstEncCol['context'];
+            $cipher = (string)($enc[$colName] ?? '');
+            $decoded = json_decode($cipher, true);
+            $kid = is_array($decoded) && is_array($decoded['local'] ?? null) ? (string)($decoded['local']['keyId'] ?? '') : '';
+            if ($kid !== '' && preg_match('~_v(?P<ver>\\d+)\\.key$~i', $kid, $m)) {
+                $ver = (int)$m['ver'];
+                $path = keyHexPath($keysDir, $ctx, $ver);
+                $bak = $path . '.bak';
+                if (is_file($path) && @rename($path, $bak)) {
+                    try {
+                        $ingress->decrypt($checkCase['table'], $enc);
+                        $wrongKeyOk = false;
+                    } catch (Throwable) {
+                        $wrongKeyOk = true;
+                    } finally {
+                        @rename($bak, $path);
+                    }
+                }
+            }
+        }
+        $checks['wrong_key_fail_ok'] = $wrongKeyOk;
+    }
+
+    $ops = 0;
+    $errorCount = 0;
+    $opCounts = [
+        'encrypt_decrypt' => 0,
+        'decrypt_fallback' => 0,
+        'criteria' => 0,
+        'hmac_verify' => 0,
+        'hmac_verify_fallback' => 0,
+    ];
+    $t0 = hrtime(true);
+    for ($i = 0; $i < $iterations; $i++) {
+        if ($criteriaCases !== [] && ($i % 5) === 0) {
+            $case = $criteriaCases[$i % count($criteriaCases)];
+            $ops++;
+            try {
+                $ingress->criteria($case['table'], $case['criteria']);
+                $opCounts['criteria']++;
+            } catch (Throwable) {
+                $errorCount++;
+            }
+            continue;
+        }
+
+        if ($encryptCases === []) {
+            continue;
+        }
+        $case = $encryptCases[$i % count($encryptCases)];
+        $ops++;
+        try {
+            $encrypted = $ingress->encrypt($case['table'], $case['payload']);
+            $opCounts['encrypt_decrypt']++;
+
+            if (($case['expected'] ?? []) !== []) {
+                $decrypted = $ingress->decrypt($case['table'], $encrypted);
+                foreach ($case['expected'] as $colName => $expectedPlain) {
+                    if (($decrypted[$colName] ?? null) !== $expectedPlain) {
+                        throw new RuntimeException('Decrypt roundtrip mismatch for ' . $case['table'] . '.' . $colName);
+                    }
+                }
+            }
+
+            // Decrypt fallback (rotation-safe): tamper keyId to an alternate version.
+            // Use the encrypt operation counter so this doesn't get starved by the criteria-only branch.
+            if (($opCounts['encrypt_decrypt'] % 10) === 0 && ($case['encrypt_columns'] ?? []) !== []) {
+                $firstEncCol = $case['encrypt_columns'][0];
+                $colName = (string)$firstEncCol['column'];
+                $ctx = (string)$firstEncCol['context'];
+                $envJson = (string)($encrypted[$colName] ?? '');
+                $envDecoded = json_decode($envJson, true);
+                $currentKeyId = is_array($envDecoded) && is_array($envDecoded['local'] ?? null)
+                    ? (string)($envDecoded['local']['keyId'] ?? '')
+                    : '';
+                if ($currentKeyId !== '') {
+                    $alt = pickAlternateKeyId($crypto, $ctx, $currentKeyId);
+                    if (is_string($alt) && $alt !== '') {
+                        $tampered = $encrypted;
+                        $tampered[$colName] = tamperEnvelopeKeyId($envJson, $alt);
+                        $decrypted2 = $ingress->decrypt($case['table'], $tampered);
+                        foreach ($case['expected'] as $c => $expectedPlain) {
+                            if (($decrypted2[$c] ?? null) !== $expectedPlain) {
+                                throw new RuntimeException('Fallback decrypt mismatch for ' . $case['table'] . '.' . $c);
+                            }
+                        }
+                        $opCounts['decrypt_fallback']++;
+                    }
+                }
+            }
+
+            // Basic HMAC verification (correct key id + wrong key id fallback).
+            if (($case['hmac_columns'] ?? []) !== [] && ($i % 3) === 0) {
+                foreach ($case['hmac_columns'] as $h) {
+                    $col = (string)$h['column'];
+                    $ctx = (string)$h['context'];
+                    $encoding = (string)$h['encoding'];
+                    $msg = (string)$h['message'];
+                    $encoded = (string)($encrypted[$col] ?? '');
+                    if ($encoded === '') {
+                        continue;
+                    }
+                    $sig = decodeHmacSignature($encoded, $encoding);
+
+                    $kvc = $h['key_version_column'] ?? null;
+                    $keyId = null;
+                    if (is_string($kvc) && $kvc !== '') {
+                        $keyId = $encrypted[$kvc] ?? null;
+                    }
+                    if (is_string($keyId) && $keyId !== '') {
+                        if (!$crypto->verifyHmacWithKeyId($ctx, $msg, $sig, $keyId)) {
+                            throw new RuntimeException('verifyHmacWithKeyId failed for ' . $case['table'] . '.' . $col);
+                        }
+                    } else {
+                        if (!$crypto->verifyHmac($ctx, $msg, $sig)) {
+                            throw new RuntimeException('verifyHmac failed for ' . $case['table'] . '.' . $col);
+                        }
+                    }
+                    $opCounts['hmac_verify']++;
+
+                    if (is_string($keyId) && $keyId !== '') {
+                        $alt = pickAlternateKeyId($crypto, $ctx, $keyId);
+                        if (is_string($alt) && $alt !== '') {
+                            if (!$crypto->verifyHmacWithKeyId($ctx, $msg, $sig, $alt)) {
+                                throw new RuntimeException('verifyHmacWithKeyId fallback failed for ' . $case['table'] . '.' . $col);
+                            }
+                            $opCounts['hmac_verify_fallback']++;
+                        }
+                    }
+                }
+            }
+
+        } catch (Throwable) {
+            $errorCount++;
+        }
+    }
+    $t1 = hrtime(true);
+
+    $elapsedMs = ($t1 - $t0) / 1_000_000;
+    $opsPerSec = $elapsedMs > 0 ? (int)round(($ops * 1000) / $elapsedMs) : null;
+
+    $result = [
+        'iterations' => $iterations,
+        'operations' => $ops,
+        'errors' => $errorCount,
+        'elapsed_ms' => (int)round($elapsedMs),
+        'ops_per_sec' => $opsPerSec,
+        'tables' => count($map->all()),
+        'contexts' => count($contexts),
+        'generated_keys' => $generatedKeys,
+        'key_versions' => $keyVersions,
+        'encrypt_cases' => count($encryptCases),
+        'criteria_cases' => count($criteriaCases),
+        'strategy_counts' => $strategyCounts,
+        'op_counts' => $opCounts,
+        'checks' => $checks,
+        'peak_memory_mb' => round(memory_get_peak_usage(true) / 1024 / 1024, 2),
+    ];
+
+    $json = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        throw new RuntimeException('Unable to encode result JSON');
+    }
+
+    $exitCode = 0;
+    if ($errorCount > 0) {
+        $exitCode = 1;
+    }
+    foreach (['rotation_ok', 'roundtrip_ok', 'fallback_ok', 'wrong_key_fail_ok'] as $k) {
+        if (($checks[$k] ?? null) === false) {
+            $exitCode = 1;
+        }
+    }
+
+    $outPath = $options['out'] ?? null;
+    if (is_string($outPath) && trim($outPath) !== '') {
+        $outPath = trim($outPath);
+        $dir = dirname($outPath);
+        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+            throw new RuntimeException('Cannot create output directory: ' . $dir);
+        }
+        file_put_contents($outPath, $json . PHP_EOL);
+        echo "Stress result written to {$outPath}\n";
+        if ($generatedKeys) {
+            cleanupDir($keysDir);
+        }
+        exit($exitCode);
+    }
+
+    echo $json . PHP_EOL;
+    if ($generatedKeys) {
+        cleanupDir($keysDir);
+    }
+    exit($exitCode);
+} catch (Throwable $e) {
+    fwrite(STDERR, 'db-crypto-stress error: ' . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
+
+/**
+ * Initialize blackcat-config runtime config for CLI tools.
+ *
+ * @param array<string,string> $options
+ */
+function initRuntimeConfig(array $options, bool $auto = true): void
+{
+    $cfg = $options['config'] ?? ($options['config-file'] ?? null);
+    if ($cfg === '1') {
+        $cfg = '';
+    }
+
+    if (!$auto) {
+        if (is_string($cfg) && trim($cfg) !== '') {
+            throw new RuntimeException('--generate-keys is incompatible with --config/--config-file.');
+        }
+        return;
+    }
+
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    if ($auto) {
+        RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+    }
+}
+
+/**
+ * Resolve keys dir from runtime config (preferred) or CLI flags.
+ *
+ * @param array<string,string> $options
+ */
+function resolveKeysDir(array $options): ?string
+{
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('crypto.keys_dir');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+        return null;
+    }
+
+    $opt = optString($options, 'keys-dir') ?? optString($options, 'keys_dir');
+    return $opt !== null && $opt !== '' ? $opt : null;
+}

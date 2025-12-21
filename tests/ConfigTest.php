@@ -2,17 +2,27 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../src/autoload.php';
+namespace BlackCat\Cli\Tests;
 
 use BlackCat\Cli\Config\CliConfig;
+use PHPUnit\Framework\TestCase;
 
-$config = CliConfig::fromFile(__DIR__ . '/../config/example.cli.php');
+final class ConfigTest extends TestCase
+{
+    public function testConfigLoadsExampleFile(): void
+    {
+        $config = CliConfig::fromFile(__DIR__ . '/../config/example.cli.php');
 
-$install = $config->command('install');
-assert(str_contains($install['script'], 'blackcat-install')); 
-assert(is_file($config->defaultShoppingList() ?? ''));
+        $install = $config->command('install');
+        self::assertStringContainsString('blackcat-install', $install['script']);
+        self::assertNotNull($config->defaultShoppingList());
+        self::assertFileExists((string) $config->defaultShoppingList());
 
-$allowed = $config->allowedRoots();
-assert($allowed !== []);
+        $allowed = $config->allowedRoots();
+        self::assertNotSame([], $allowed);
 
-echo "Config loader OK\n";
+        $commands = $config->commands();
+        self::assertArrayHasKey('crypto', $commands);
+        self::assertArrayHasKey('db', $commands);
+    }
+}
