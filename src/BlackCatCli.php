@@ -353,6 +353,7 @@ final class BlackCatCli
             'db-crypto' => $this->runDbCrypto($args),
             'crypto' => $this->runCrypto($args),
             'config' => $this->runConfig($args),
+            'deployer' => $this->runDeployer($args),
             'monitoring' => $this->runMonitoring($args),
             'observability' => $this->runObservability($args),
             'usage' => $this->runUsage($args),
@@ -513,6 +514,26 @@ final class BlackCatCli
 
         $cmd = array_merge([PHP_BINARY, $script], $rest);
         return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runDeployer(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+
+        if ($sub === 'help' || $sub === '--help' || $sub === '-h') {
+            echo "deployer\n";
+            echo "Usage: blackcat deployer <subcommand> [args...]\n\n";
+            echo "Status: bootstrap (command surface will be expanded in blackcat-deployer).\n\n";
+            echo "Docs:\n";
+            echo "  - blackcat-deployer/docs/ROADMAP.md\n";
+            return 0;
+        }
+
+        fwrite(STDERR, "deployer subcommand not found: {$sub}\n");
+        return 1;
     }
 
     /**
