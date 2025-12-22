@@ -35,6 +35,7 @@ foreach ($candidates as $path) {
             'BlackCat\\Core\\' => $workspaceRoot . '/blackcat-core/src',
             'BlackCat\\Monitoring\\' => $workspaceRoot . '/blackcat-monitoring/src',
             'BlackCat\\Observability\\' => $workspaceRoot . '/blackcat-observability/src',
+            'BlackCat\\Usage\\' => $workspaceRoot . '/blackcat-usage/src',
         ];
 
         foreach ($fallbacks as $prefix => $dir) {

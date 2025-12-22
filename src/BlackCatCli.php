@@ -332,6 +332,7 @@ final class BlackCatCli
             'db-crypto' => $this->runDbCrypto($args),
             'monitoring' => $this->runMonitoring($args),
             'observability' => $this->runObservability($args),
+            'usage' => $this->runUsage($args),
             default => $this->unknownBuiltin($spec->command()),
         };
     }
@@ -507,6 +508,39 @@ final class BlackCatCli
 
         if (!is_file($script)) {
             fwrite(STDERR, "observability runner not found: {$script}\n");
+            return 1;
+        }
+
+        $cmd = array_merge([PHP_BINARY, $script], $args);
+        return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runUsage(array $args): int
+    {
+        $cliRoot = dirname(__DIR__);
+        $script = $cliRoot . '/libexec/usage';
+
+        $sub = $args[0] ?? 'help';
+        if ($sub === 'help' || $sub === '--help' || $sub === '-h' || $sub === '') {
+            echo "usage\n";
+            echo "Usage: blackcat usage [--config=FILE] <command> [args...]\n\n";
+            echo "Commands:\n";
+            echo "  ingest            Ingest one usage event (JSON)\n";
+            echo "  aggregate         Revenue snapshot per component\n";
+            echo "  export            Export raw events or revenue snapshot\n";
+            echo "  coverage          Coverage summary (contexts/events)\n";
+            echo "\nExamples:\n";
+            echo "  blackcat usage ingest '{\"component_id\":\"identity-consent-card\",\"tenant_id\":\"acme\",\"count\":5}'\n";
+            echo "  blackcat usage aggregate\n";
+            echo "  blackcat usage export revenue > snapshot.json\n";
+            return 0;
+        }
+
+        if (!is_file($script)) {
+            fwrite(STDERR, "usage runner not found: {$script}\n");
             return 1;
         }
 

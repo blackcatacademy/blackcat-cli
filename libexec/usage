@@ -1,0 +1,284 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Usage\Config\UsageConfig;
+use BlackCat\Usage\UsageService;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * usage
+ *
+ * Usage:
+ *   blackcat usage [--config=FILE] ingest '{"component_id":"...", "tenant_id":"..."}'
+ *   blackcat usage [--config=FILE] aggregate
+ *   blackcat usage [--config=FILE] export [ndjson|json|revenue]
+ *   blackcat usage [--config=FILE] coverage [--table] [--top=N]
+ *
+ * Compatibility:
+ *   bin/usage <config> <command> [args...]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+$workspaceRoot = dirname(__DIR__, 2);
+
+$configPath = configPathFromArgs($options, $positionals, $workspaceRoot);
+$command = (string)($positionals[0] ?? 'help');
+$cmdArgs = array_slice($positionals, 1);
+
+if ($command === '' || $command === 'help' || $command === '--help' || $command === '-h') {
+    usage($configPath);
+    exit(0);
+}
+
+try {
+    $config = UsageConfig::fromFile($configPath);
+} catch (\Throwable $e) {
+    err('[usage] ' . $e->getMessage());
+    exit(2);
+}
+
+$service = UsageService::boot($config);
+
+switch ($command) {
+    case 'ingest':
+        ingestCommand($service, $cmdArgs);
+        break;
+    case 'aggregate':
+        aggregateCommand($service);
+        break;
+    case 'export':
+        exportCommand($service, $cmdArgs);
+        break;
+    case 'coverage':
+        coverageCommand($service, $cmdArgs);
+        break;
+    default:
+        err("Unknown command: {$command}");
+        usage($configPath);
+        exit(1);
+}
+
+/**
+ * @param string[] $args
+ */
+function ingestCommand(UsageService $service, array $args): void
+{
+    $json = $args[0] ?? null;
+    if ($json === null) {
+        err('Usage: blackcat usage ingest \'{\"component_id\":\"foo\",\"tenant_id\":\"bar\"}\'');
+        exit(1);
+    }
+
+    if ($json === '-') {
+        $json = stream_get_contents(STDIN) ?: '';
+    }
+
+    $payload = json_decode($json, true);
+    if (!is_array($payload)) {
+        err('Invalid JSON payload.');
+        exit(1);
+    }
+
+    $event = $service->ingest($payload);
+    echo json_encode($event, JSON_PRETTY_PRINT) . PHP_EOL;
+}
+
+function aggregateCommand(UsageService $service): void
+{
+    $snapshot = $service->aggregator()->revenueSnapshot();
+    if ($snapshot === []) {
+        out('No events recorded yet.');
+        return;
+    }
+
+    foreach ($snapshot as $row) {
+        echo sprintf(
+            "%s | tenants:%d | events:%d | avg:%0.2f\n",
+            (string) ($row['component_id'] ?? 'unknown'),
+            (int) ($row['tenants'] ?? 0),
+            (int) ($row['events'] ?? 0),
+            (float) ($row['avg_per_tenant'] ?? 0.0)
+        );
+    }
+}
+
+/**
+ * @param string[] $args
+ */
+function exportCommand(UsageService $service, array $args): void
+{
+    $format = $args[0] ?? 'ndjson';
+    if ($format === 'revenue') {
+        echo $service->exporter()->exportRevenueSnapshot() . PHP_EOL;
+        return;
+    }
+
+    echo $service->exporter()->exportEvents($format) . PHP_EOL;
+}
+
+/**
+ * @param string[] $args
+ */
+function coverageCommand(UsageService $service, array $args): void
+{
+    $options = ['table' => false, 'top' => 10];
+    foreach ($args as $arg) {
+        if ($arg === '--table') {
+            $options['table'] = true;
+        } elseif (str_starts_with($arg, '--top=')) {
+            $options['top'] = max(1, (int) substr($arg, 6));
+        }
+    }
+
+    $summary = $service->aggregator()->summarizeByComponent();
+    $contexts = [];
+    $total = 0;
+    foreach ($summary as $component => $data) {
+        $count = (int) ($data['events'] ?? 0);
+        $contexts[sprintf('usage.component.%s', (string) $component)] = $count;
+        $total += $count;
+    }
+
+    $coverage = [
+        'total' => $total,
+        'contexts' => $contexts,
+        'missing_meta' => 0,
+    ];
+
+    if ($options['table']) {
+        printCoverageTable($coverage, (int) $options['top']);
+    } else {
+        echo json_encode($coverage, JSON_PRETTY_PRINT) . PHP_EOL;
+    }
+}
+
+/**
+ * @param array{total:int,contexts:array<string,int>,missing_meta:int} $coverage
+ */
+function printCoverageTable(array $coverage, int $top): void
+{
+    $contexts = $coverage['contexts'];
+    arsort($contexts);
+    if ($top > 0) {
+        $contexts = array_slice($contexts, 0, $top, true);
+    }
+
+    printf("%-50s %s\n", 'Context', 'Events');
+    printf("%'-50s %s\n", '', '------');
+    foreach ($contexts as $context => $count) {
+        printf("%-50s %d\n", $context, $count);
+    }
+    printf("%'-50s %s\n", '', '------');
+    printf("%-50s %d\n", 'Total', $coverage['total']);
+    printf("%-50s %d\n", 'Missing metadata', $coverage['missing_meta']);
+}
+
+function usage(string $configPath): void
+{
+    out('usage');
+    out('Usage: blackcat usage [--config=FILE] <command> [args...]');
+    out('');
+    out('Commands:');
+    out('  ingest <json>                Ingest one usage event (or pass - to read stdin)');
+    out('  aggregate                    Print revenue snapshot per component');
+    out('  export [ndjson|json|revenue] Export raw events or revenue snapshot');
+    out('  coverage [--table] [--top=N] Coverage summary (contexts/events)');
+    out('');
+    out('Config:');
+    out('  --config=FILE                Usage config file (default: ' . $configPath . ')');
+    out('  (legacy) <config> <command>  Also accepted for compatibility wrappers');
+    out('');
+    out('Examples:');
+    out('  blackcat usage ingest \'{\"component_id\":\"identity-consent-card\",\"tenant_id\":\"acme\",\"count\":5}\'');
+    out('  blackcat usage aggregate');
+    out('  blackcat usage export revenue > snapshot.json');
+    out('  blackcat usage coverage --table --top=20');
+}
+
+function out(string $line): void
+{
+    echo $line . PHP_EOL;
+}
+
+function err(string $line): void
+{
+    fwrite(STDERR, $line . PHP_EOL);
+}
+
+/**
+ * @param array<string,string|bool> $options
+ * @param list<string> $positionals
+ */
+function configPathFromArgs(array $options, array &$positionals, string $workspaceRoot): string
+{
+    $value = $options['config'] ?? ($options['config-file'] ?? null);
+    if (is_string($value) && $value !== '') {
+        return $value;
+    }
+
+    $first = $positionals[0] ?? null;
+    if (is_string($first) && $first !== '' && is_file($first)) {
+        array_shift($positionals);
+        return $first;
+    }
+
+    $env = getenv('BLACKCAT_USAGE_CONFIG');
+    if (is_string($env) && $env !== '') {
+        return $env;
+    }
+
+    return $workspaceRoot . '/blackcat-usage/config/example.usage.php';
+}
+
+/**
+ * @param string[] $args
+ * @return array{0:array<string,string|bool>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    /** @var array<string,string|bool> $options */
+    $options = [];
+    /** @var list<string> $positionals */
+    $positionals = [];
+
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if ($arg === '--') {
+            $positionals = array_merge($positionals, $args);
+            break;
+        }
+
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--')) {
+            $pair = explode('=', substr($arg, 2), 2);
+            $key = $pair[0] ?? '';
+            if ($key === '') {
+                continue;
+            }
+            if (count($pair) === 2) {
+                $options[$key] = (string) $pair[1];
+                continue;
+            }
+
+            $next = $args[0] ?? null;
+            if (is_string($next) && $next !== '' && !str_starts_with($next, '-')) {
+                $options[$key] = (string) array_shift($args);
+            } else {
+                $options[$key] = true;
+            }
+            continue;
+        }
+
+        $positionals[] = $arg;
+    }
+
+    return [$options, $positionals];
+}
+
