@@ -47,6 +47,8 @@ switch ($action) {
         out("  Grafana:     http://localhost:3000  (admin / devpass)");
         out("  Prometheus:  http://localhost:9090");
         out("  Loki:        http://localhost:3100");
+        out("  Bench:       http://localhost:9464/metrics");
+        out("  Obs metrics: http://localhost:9465/metrics");
         out('');
         out("Compose file: {$composeFile}");
         out("Project:      {$project}");
@@ -169,4 +171,3 @@ function parseArgs(array $args): array
 
     return [$options, $positionals];
 }
-
