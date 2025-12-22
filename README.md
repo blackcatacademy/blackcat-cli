@@ -54,6 +54,7 @@ $install = $config->command('install');
 - `blackcat verify [--json] [--config=FILE]` performs security/integration checks (exit 2 on failure) and, when available, runs doctor-style checks:
   - validates runtime config via `blackcat-config` (when present)
   - checks Prometheus targets (when `blackcat-monitoring` is present and Prometheus is reachable)
+  - checks monitoring endpoints (Grafana/Loki/Promtail + exporters `/metrics`) when reachable
 
 ## Tests
 

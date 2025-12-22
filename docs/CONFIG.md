@@ -48,6 +48,7 @@ Manifests are validated by `blackcat-cli-spec`.
 `blackcat verify` (exit 2) ensures proxy targets exist and are inside allowed roots, and can also run doctor-style checks:
 - runtime config validation via `blackcat-config` (when present; pass `--config=FILE` to force a specific JSON file)
 - Prometheus target health (when `blackcat-monitoring` is present and Prometheus is reachable)
+- monitoring endpoints (Grafana/Loki/Promtail + exporters `/metrics`) when reachable
 
 ```bash
 php bin/blackcat status --json

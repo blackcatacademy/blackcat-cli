@@ -693,6 +693,9 @@ final class BlackCatCli
         foreach ($this->prometheusDoctorChecks($workspaceRoot) as $check) {
             $checks[] = $check;
         }
+        foreach ($this->monitoringEndpointsDoctorChecks($workspaceRoot) as $check) {
+            $checks[] = $check;
+        }
 
         return $checks;
     }
@@ -884,6 +887,94 @@ final class BlackCatCli
             'status' => 'ok',
             'message' => 'All required targets are UP.',
         ]];
+    }
+
+    /**
+     * @return array<int,array{name:string,status:string,message:string}>
+     */
+    private function monitoringEndpointsDoctorChecks(string $workspaceRoot): array
+    {
+        if (!is_dir($workspaceRoot . '/blackcat-monitoring')) {
+            return [[
+                'name' => 'monitoring.endpoints',
+                'status' => 'skip',
+                'message' => 'blackcat-monitoring not present in this workspace.',
+            ]];
+        }
+
+        $checks = [];
+
+        // Grafana
+        try {
+            $health = $this->httpGetJson('http://localhost:3000/api/health', 2.0);
+            $db = $health['database'] ?? null;
+            if ($db === 'ok') {
+                $checks[] = ['name' => 'grafana.health', 'status' => 'ok', 'message' => 'Grafana is healthy.'];
+            } else {
+                $checks[] = ['name' => 'grafana.health', 'status' => 'fail', 'message' => 'Grafana health check failed (database != ok).'];
+            }
+        } catch (\Throwable $e) {
+            $checks[] = ['name' => 'grafana.health', 'status' => 'skip', 'message' => $e->getMessage()];
+        }
+
+        // Loki
+        try {
+            $res = $this->httpGet('http://localhost:3100/ready', 2.0);
+            if ($res['status'] === 200 && str_contains($res['body'], 'ready')) {
+                $checks[] = ['name' => 'loki.ready', 'status' => 'ok', 'message' => 'Loki is ready.'];
+            } else {
+                $checks[] = ['name' => 'loki.ready', 'status' => 'fail', 'message' => 'Loki not ready (HTTP ' . $res['status'] . ').'];
+            }
+        } catch (\Throwable $e) {
+            $checks[] = ['name' => 'loki.ready', 'status' => 'skip', 'message' => $e->getMessage()];
+        }
+
+        // Promtail (metrics endpoint; in the dev stack it is exposed on :9080).
+        try {
+            $res = $this->httpGet('http://localhost:9080/metrics', 2.0);
+            if ($res['status'] !== 200) {
+                $checks[] = ['name' => 'promtail.metrics', 'status' => 'fail', 'message' => 'Promtail metrics not reachable (HTTP ' . $res['status'] . ').'];
+            } elseif (!str_contains($res['body'], 'promtail_build_info')) {
+                $checks[] = ['name' => 'promtail.metrics', 'status' => 'fail', 'message' => 'Promtail metrics response missing promtail_build_info.'];
+            } else {
+                $checks[] = ['name' => 'promtail.metrics', 'status' => 'ok', 'message' => 'Promtail metrics OK.'];
+            }
+        } catch (\Throwable $e) {
+            $checks[] = ['name' => 'promtail.metrics', 'status' => 'skip', 'message' => $e->getMessage()];
+        }
+
+        // Bench exporter sanity (/metrics should always work, even with 0 CSVs).
+        try {
+            $res = $this->httpGet('http://localhost:9464/metrics', 2.0);
+            if ($res['status'] !== 200) {
+                $checks[] = ['name' => 'bench-exporter.metrics', 'status' => 'fail', 'message' => 'Bench exporter not reachable (HTTP ' . $res['status'] . ').'];
+            } elseif (!str_contains($res['body'], 'bench_ops_total')) {
+                $checks[] = ['name' => 'bench-exporter.metrics', 'status' => 'fail', 'message' => 'Bench exporter response missing bench_ops_total.'];
+            } else {
+                $checks[] = ['name' => 'bench-exporter.metrics', 'status' => 'ok', 'message' => 'Bench exporter /metrics OK.'];
+            }
+        } catch (\Throwable $e) {
+            $checks[] = ['name' => 'bench-exporter.metrics', 'status' => 'skip', 'message' => $e->getMessage()];
+        }
+
+        // Observability exporter sanity (may be empty when no metrics were produced yet).
+        try {
+            $res = $this->httpGet('http://localhost:9465/metrics', 2.0);
+            if ($res['status'] !== 200) {
+                $checks[] = ['name' => 'observability-exporter.metrics', 'status' => 'fail', 'message' => 'Observability exporter not reachable (HTTP ' . $res['status'] . ').'];
+            } else {
+                $bytes = strlen($res['body']);
+                $checks[] = [
+                    'name' => 'observability-exporter.metrics',
+                    'status' => 'ok',
+                    'message' => $bytes > 0 ? ('Observability exporter /metrics OK (' . $bytes . ' bytes).') : 'Observability exporter /metrics OK (no metrics yet).',
+                ];
+            }
+        } catch (\Throwable $e) {
+            $checks[] = ['name' => 'observability-exporter.metrics', 'status' => 'skip', 'message' => $e->getMessage()];
+        }
+
+        return $checks;
     }
 
     /**
