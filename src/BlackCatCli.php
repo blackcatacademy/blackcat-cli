@@ -110,7 +110,7 @@ final class BlackCatCli
         echo "  configure <shopping-list.json>    Configure shopping list via installer\n";
         echo "  install <shopping-list.json>      Run blackcat-install pipeline\n";
         echo "  status [--json]                   List configured proxies + status\n";
-        echo "  verify [--json]                   Security + integration checks\n";
+        echo "  verify [--json] [--config=FILE]   Security + integration checks\n";
         echo "\nConfigured proxy commands:\n";
 
         $configured = array_keys($this->config->commands());
@@ -235,7 +235,7 @@ final class BlackCatCli
     private function runVerify(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
-        $remaining = self::stripRuntimeConfigArgs($remaining);
+        [$runtimeConfigPath, $remaining] = self::consumeRuntimeConfigPath($remaining);
         if ($remaining !== []) {
             fwrite(STDERR, 'verify does not accept additional arguments' . PHP_EOL);
             return 1;
@@ -249,6 +249,12 @@ final class BlackCatCli
         ));
 
         $manifestErrors = $checker->manifestErrors();
+        $doctorChecks = $this->runDoctorChecks($runtimeConfigPath);
+
+        $doctorFailures = array_values(array_filter(
+            $doctorChecks,
+            static fn (array $check): bool => $check['status'] === 'fail'
+        ));
 
         if ($json) {
             echo json_encode([
@@ -259,6 +265,7 @@ final class BlackCatCli
                 ),
                 'violations' => $violations,
                 'commands' => $results,
+                'doctor_checks' => $doctorChecks,
             ], JSON_PRETTY_PRINT) . PHP_EOL;
         } else {
             foreach ($results as $row) {
@@ -266,13 +273,27 @@ final class BlackCatCli
                 $status = ($row['exists'] && $row['allowed']) ? 'OK' : 'FAIL';
                 echo sprintf('[%s] %-12s %s' . PHP_EOL, $status, $row['command'], $path);
             }
+
+            if ($doctorChecks !== []) {
+                echo PHP_EOL . "Doctor checks\n";
+                foreach ($doctorChecks as $check) {
+                    $name = $check['name'];
+                    $status = strtoupper($check['status']);
+                    $msg = $check['message'];
+                    echo sprintf('[%s] %-24s %s' . PHP_EOL, $status, $name, $msg);
+                }
+            }
         }
 
         if ($manifestErrors !== []) {
             fwrite(STDERR, 'Manifest validation failed for ' . count($manifestErrors) . ' file(s).' . PHP_EOL);
         }
 
-        if ($violations !== [] || $manifestErrors !== []) {
+        if ($doctorFailures !== []) {
+            fwrite(STDERR, 'Doctor checks failed.' . PHP_EOL);
+        }
+
+        if ($violations !== [] || $manifestErrors !== [] || $doctorFailures !== []) {
             fwrite(STDERR, 'Integration check failed.' . PHP_EOL);
             return 2;
         }
@@ -611,5 +632,315 @@ final class BlackCatCli
         }
 
         return $filtered;
+    }
+
+    /**
+     * @param string[] $args
+     * @return array{0:?string,1:string[]}
+     */
+    private static function consumeRuntimeConfigPath(array $args): array
+    {
+        $filtered = [];
+        $path = null;
+        $skipNext = false;
+
+        foreach ($args as $arg) {
+            if ($skipNext) {
+                $skipNext = false;
+                if ($path === null && $arg !== '') {
+                    $path = $arg;
+                }
+                continue;
+            }
+
+            if ($arg === '--config' || $arg === '--config-file') {
+                $skipNext = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--config=') || str_starts_with($arg, '--config-file=')) {
+                $val = explode('=', $arg, 2)[1] ?? '';
+                if ($path === null && $val !== '') {
+                    $path = $val;
+                }
+                continue;
+            }
+
+            $filtered[] = $arg;
+        }
+
+        if ($path !== null) {
+            $path = trim($path);
+            if ($path === '' || $path === '1') {
+                $path = null;
+            }
+        }
+
+        return [$path, $filtered];
+    }
+
+    /**
+     * @return array<int,array{name:string,status:string,message:string}>
+     */
+    private function runDoctorChecks(?string $runtimeConfigPath): array
+    {
+        $workspaceRoot = $this->config->workspaceRoot();
+        $checks = [];
+
+        foreach ($this->runtimeConfigDoctorChecks($workspaceRoot, $runtimeConfigPath) as $check) {
+            $checks[] = $check;
+        }
+        foreach ($this->prometheusDoctorChecks($workspaceRoot) as $check) {
+            $checks[] = $check;
+        }
+
+        return $checks;
+    }
+
+    /**
+     * @return array<int,array{name:string,status:string,message:string}>
+     */
+    private function runtimeConfigDoctorChecks(string $workspaceRoot, ?string $runtimeConfigPath): array
+    {
+        $needsCrypto = is_dir($workspaceRoot . '/blackcat-crypto') || is_dir($workspaceRoot . '/blackcat-database-crypto');
+        $needsObservability = is_dir($workspaceRoot . '/blackcat-observability') || is_dir($workspaceRoot . '/blackcat-monitoring');
+
+        if (!$needsCrypto && !$needsObservability && $runtimeConfigPath === null) {
+            return [[
+                'name' => 'runtime-config',
+                'status' => 'skip',
+                'message' => 'No runtime-config checks required for this workspace.',
+            ]];
+        }
+
+        if (!class_exists('\\BlackCat\\Config\\Runtime\\Config')) {
+            $autoload = $workspaceRoot . '/blackcat-config/src/autoload.php';
+            if (is_file($autoload)) {
+                require_once $autoload;
+            }
+        }
+
+        if (!class_exists('\\BlackCat\\Config\\Runtime\\Config')) {
+            return [[
+                'name' => 'runtime-config',
+                'status' => 'skip',
+                'message' => 'blackcat-config is not available (skipping runtime config validation).',
+            ]];
+        }
+
+        $checks = [];
+        $checks[] = [
+            'name' => 'runtime-config.file',
+            'status' => 'ok',
+            'message' => 'Runtime config initialized.',
+        ];
+
+        try {
+            if (is_string($runtimeConfigPath) && $runtimeConfigPath !== '') {
+                \BlackCat\Config\Runtime\Config::initFromJsonFileIfNeeded($runtimeConfigPath);
+            } else {
+                \BlackCat\Config\Runtime\Config::tryInitFromFirstAvailableJsonFile();
+            }
+        } catch (\Throwable $e) {
+            return [[
+                'name' => 'runtime-config.file',
+                'status' => 'fail',
+                'message' => $e->getMessage(),
+            ]];
+        }
+
+        if (!\BlackCat\Config\Runtime\Config::isInitialized()) {
+            $status = $runtimeConfigPath !== null ? 'fail' : 'skip';
+            $checks[0] = [
+                'name' => 'runtime-config.file',
+                'status' => $status,
+                'message' => 'No runtime config file found (use --config=FILE or install to /etc/blackcat/config.runtime.json).',
+            ];
+            return $checks;
+        }
+
+        $repo = \BlackCat\Config\Runtime\Config::repo();
+
+        if ($needsCrypto) {
+            try {
+                \BlackCat\Config\Runtime\RuntimeConfigValidator::assertCryptoConfig($repo);
+                $checks[] = ['name' => 'runtime-config.crypto', 'status' => 'ok', 'message' => 'Crypto config is valid.'];
+            } catch (\Throwable $e) {
+                $checks[] = ['name' => 'runtime-config.crypto', 'status' => 'fail', 'message' => $e->getMessage()];
+            }
+        }
+
+        if ($needsObservability) {
+            try {
+                \BlackCat\Config\Runtime\RuntimeConfigValidator::assertObservabilityConfig($repo);
+                $checks[] = ['name' => 'runtime-config.observability', 'status' => 'ok', 'message' => 'Observability config is valid.'];
+            } catch (\Throwable $e) {
+                $checks[] = ['name' => 'runtime-config.observability', 'status' => 'fail', 'message' => $e->getMessage()];
+            }
+        }
+
+        return $checks;
+    }
+
+    /**
+     * @return array<int,array{name:string,status:string,message:string}>
+     */
+    private function prometheusDoctorChecks(string $workspaceRoot): array
+    {
+        if (!is_dir($workspaceRoot . '/blackcat-monitoring')) {
+            return [[
+                'name' => 'prometheus.targets',
+                'status' => 'skip',
+                'message' => 'blackcat-monitoring not present in this workspace.',
+            ]];
+        }
+
+        $base = 'http://localhost:9090';
+
+        try {
+            $ready = $this->httpGet($base . '/-/ready', 1.5);
+        } catch (\Throwable $e) {
+            return [[
+                'name' => 'prometheus.ready',
+                'status' => 'skip',
+                'message' => $e->getMessage() . ' (start: blackcat monitoring stack up)',
+            ]];
+        }
+
+        if ($ready['status'] !== 200) {
+            return [[
+                'name' => 'prometheus.ready',
+                'status' => 'fail',
+                'message' => 'Prometheus not ready (HTTP ' . $ready['status'] . ').',
+            ]];
+        }
+
+        try {
+            $targets = $this->httpGetJson($base . '/api/v1/targets', 2.5);
+        } catch (\Throwable $e) {
+            return [[
+                'name' => 'prometheus.targets',
+                'status' => 'fail',
+                'message' => $e->getMessage(),
+            ]];
+        }
+
+        if (($targets['status'] ?? null) !== 'success') {
+            return [[
+                'name' => 'prometheus.targets',
+                'status' => 'fail',
+                'message' => 'Prometheus targets API returned non-success status.',
+            ]];
+        }
+
+        $requiredJobs = ['blackcat-bench', 'blackcat-observability'];
+        $activeTargets = $targets['data']['activeTargets'] ?? null;
+        if (!is_array($activeTargets)) {
+            return [[
+                'name' => 'prometheus.targets',
+                'status' => 'fail',
+                'message' => 'Prometheus targets API response is missing activeTargets.',
+            ]];
+        }
+
+        $jobHealth = [];
+        foreach ($activeTargets as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $labels = $t['labels'] ?? null;
+            if (!is_array($labels)) {
+                continue;
+            }
+            $job = $labels['job'] ?? null;
+            if (!is_string($job) || $job === '') {
+                continue;
+            }
+
+            $health = $t['health'] ?? null;
+            if (is_string($health) && $health !== '') {
+                $jobHealth[$job] = $health;
+            }
+        }
+
+        $missingOrDown = [];
+        foreach ($requiredJobs as $job) {
+            $health = $jobHealth[$job] ?? null;
+            if ($health !== 'up') {
+                $missingOrDown[] = $job . ':' . ($health ?? 'missing');
+            }
+        }
+
+        if ($missingOrDown !== []) {
+            return [[
+                'name' => 'prometheus.targets',
+                'status' => 'fail',
+                'message' => 'Targets not UP: ' . implode(', ', $missingOrDown),
+            ]];
+        }
+
+        return [[
+            'name' => 'prometheus.targets',
+            'status' => 'ok',
+            'message' => 'All required targets are UP.',
+        ]];
+    }
+
+    /**
+     * @return array{status:int,body:string}
+     */
+    private function httpGet(string $url, float $timeoutSeconds): array
+    {
+        $ctx = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => $timeoutSeconds,
+                'ignore_errors' => true,
+                'header' => "User-Agent: blackcat-cli\r\n",
+            ],
+        ]);
+
+        /** @var list<string> $http_response_header */
+        $http_response_header = [];
+        $body = @file_get_contents($url, false, $ctx);
+        $headers = $http_response_header;
+        $status = 0;
+        if ($headers !== []) {
+            $first = (string) ($headers[0] ?? '');
+            if (preg_match('/\\s(\\d{3})\\s/', $first, $m)) {
+                $status = (int) $m[1];
+            }
+        }
+
+        if ($body === false) {
+            throw new \RuntimeException('HTTP request failed: ' . $url);
+        }
+
+        return [
+            'status' => $status,
+            'body' => $body,
+        ];
+    }
+
+    /**
+     * @return array<string,mixed>
+     */
+    private function httpGetJson(string $url, float $timeoutSeconds): array
+    {
+        $res = $this->httpGet($url, $timeoutSeconds);
+
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($res['body'], true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new \RuntimeException('Invalid JSON from: ' . $url, 0, $e);
+        }
+
+        if (!is_array($decoded)) {
+            throw new \RuntimeException('Expected JSON object from: ' . $url);
+        }
+
+        /** @var array<string,mixed> $decoded */
+        return $decoded;
     }
 }

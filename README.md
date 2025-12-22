@@ -51,7 +51,9 @@ $install = $config->command('install');
 ## Telemetry & security
 - Each run appends an event to `var/cli-events.ndjson` and Prometheus metrics to `var/cli-metrics.prom`.
 - `blackcat status [--json]` lists configured/discovered commands and their resolved targets.
-- `blackcat verify [--json]` performs security/integration checks (exit 2 on failure), suitable for CI.
+- `blackcat verify [--json] [--config=FILE]` performs security/integration checks (exit 2 on failure) and, when available, runs doctor-style checks:
+  - validates runtime config via `blackcat-config` (when present)
+  - checks Prometheus targets (when `blackcat-monitoring` is present and Prometheus is reachable)
 
 ## Tests
 

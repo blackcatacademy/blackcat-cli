@@ -43,9 +43,14 @@ Manifests are validated by `blackcat-cli-spec`.
 
 ## Security + integrations
 
-`blackcat status` prints configured/discovered commands. `blackcat verify` (exit 2) ensures proxy targets exist and are inside allowed roots.
+`blackcat status` prints configured/discovered commands.
+
+`blackcat verify` (exit 2) ensures proxy targets exist and are inside allowed roots, and can also run doctor-style checks:
+- runtime config validation via `blackcat-config` (when present; pass `--config=FILE` to force a specific JSON file)
+- Prometheus target health (when `blackcat-monitoring` is present and Prometheus is reachable)
 
 ```bash
 php bin/blackcat status --json
 php bin/blackcat verify --json
+php bin/blackcat verify --json --config=/etc/blackcat/config.runtime.json
 ```
