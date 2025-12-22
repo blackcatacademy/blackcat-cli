@@ -5,6 +5,7 @@ declare(strict_types=1);
 use BlackCat\Observability\Storage\LocalStore;
 use BlackCat\Observability\Export\PrometheusTextExporter;
 use BlackCat\Observability\Metrics\MetricsAggregator;
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
 
 require __DIR__ . '/bootstrap.php';
 
@@ -12,6 +13,8 @@ require __DIR__ . '/bootstrap.php';
  * observability
  *
  * Usage:
+ *   blackcat observability config:print [--service=NAME] [--storage-dir=DIR]
+ *   blackcat observability config:init --out=FILE [--force] [--service=NAME] [--storage-dir=DIR]
  *   blackcat observability store:info [--storage-dir=DIR]
  *   blackcat observability events:tail [--limit=10] [--storage-dir=DIR]
  *   blackcat observability events:clear [--storage-dir=DIR]
@@ -27,15 +30,11 @@ $args = array_slice($argv, 1);
 $cmd = (string)($positionals[0] ?? 'help');
 
 $workspaceRoot = dirname(__DIR__, 2);
-$defaultStorage = $workspaceRoot . '/blackcat-observability/var';
-$storageDir = (string)($options['storage-dir'] ?? ($options['storage'] ?? (getenv('OBS_STORAGE') ?: $defaultStorage)));
 
-try {
-    $store = new LocalStore($storageDir);
-} catch (\Throwable $e) {
-    err($e->getMessage());
-    exit(2);
-}
+initRuntimeConfig($options);
+
+$defaultStorage = resolveDefaultStorageDir($workspaceRoot);
+$storageDir = resolveStorageDir($options, $defaultStorage);
 
 switch ($cmd) {
     case '':
@@ -45,7 +44,53 @@ switch ($cmd) {
         usage();
         exit(0);
 
+    case 'config:print':
+        echo json_encode(buildRuntimeConfigSnippet($options, $defaultStorage), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        exit(0);
+
+    case 'config:init':
+        $outPath = $options['out'] ?? null;
+        $force = array_key_exists('force', $options);
+        if (!is_string($outPath) || trim($outPath) === '' || $outPath === '1') {
+            err('Missing required option: --out=FILE');
+            usage();
+            exit(2);
+        }
+
+        $outPath = trim($outPath);
+        if (is_file($outPath) && !$force) {
+            err("File already exists: {$outPath} (use --force to overwrite)");
+            exit(3);
+        }
+
+        $dir = dirname($outPath);
+        if ($dir !== '' && $dir !== '.' && !is_dir($dir)) {
+            if (!@mkdir($dir, 0750, true) && !is_dir($dir)) {
+                err("Unable to create directory: {$dir}");
+                exit(4);
+            }
+        }
+
+        $json = json_encode(buildRuntimeConfigSnippet($options, $defaultStorage), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($json) || $json === '') {
+            err('Failed to encode JSON config snippet.');
+            exit(5);
+        }
+
+        if (@file_put_contents($outPath, $json . PHP_EOL) === false) {
+            err("Unable to write: {$outPath}");
+            exit(6);
+        }
+
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            @chmod($outPath, 0600);
+        }
+
+        out("Wrote: {$outPath}");
+        exit(0);
+
     case 'store:info':
+        $store = openStore($storageDir);
         $eventsPath = $store->eventsFilePath();
         $metricsPath = $store->metricsFilePath();
 
@@ -79,6 +124,7 @@ switch ($cmd) {
         exit(0);
 
     case 'events:tail':
+        $store = openStore($storageDir);
         $limit = (int)($options['limit'] ?? 10);
         if ($limit < 1) {
             $limit = 10;
@@ -89,16 +135,19 @@ switch ($cmd) {
         exit(0);
 
     case 'events:clear':
+        $store = openStore($storageDir);
         $store->clearEvents();
         out('OK');
         exit(0);
 
     case 'metrics:snapshot':
+        $store = openStore($storageDir);
         $metrics = $store->metrics();
         echo json_encode(MetricsAggregator::sumByName($metrics), JSON_PRETTY_PRINT) . PHP_EOL;
         exit(0);
 
     case 'metrics:tail':
+        $store = openStore($storageDir);
         $limit = (int)($options['limit'] ?? 10);
         if ($limit < 1) {
             $limit = 10;
@@ -109,11 +158,13 @@ switch ($cmd) {
         exit(0);
 
     case 'metrics:clear':
+        $store = openStore($storageDir);
         $store->clearMetrics();
         out('OK');
         exit(0);
 
     case 'metrics:export':
+        $store = openStore($storageDir);
         $format = strtolower(trim((string)($positionals[1] ?? 'prom')));
         $noServiceLabel = array_key_exists('no-service-label', $options);
 
@@ -144,6 +195,8 @@ function usage(): void
     out('Usage: blackcat observability <command> [options]');
     out('');
     out('Commands:');
+    out('  config:print       Print runtime config snippet (JSON)');
+    out('  config:init        Write runtime config snippet to file');
     out('  store:info         Print local store paths + counts');
     out('  events:tail        Print last N events as JSON');
     out('  events:clear       Clear events file');
@@ -154,6 +207,10 @@ function usage(): void
     out('');
     out('Options:');
     out('  --storage-dir=DIR  Override local store directory');
+    out('  --config=FILE      Runtime config JSON file (used when storage dir is not explicit)');
+    out('  --service=NAME     Service name (config:print/config:init)');
+    out('  --out=FILE         Output path (config:init)');
+    out('  --force            Overwrite output file (config:init)');
     out('  --limit=N          Tail limit (events:tail, default: 10)');
     out('  --no-service-label Omit the "service" label in metrics:export');
 }
@@ -214,4 +271,110 @@ function parseArgs(array $args): array
     }
 
     return [$options, $positionals];
+}
+
+/**
+ * Initialize blackcat-config runtime config (optional) so we can resolve storage paths.
+ *
+ * @param array<string,string|bool> $options
+ */
+function initRuntimeConfig(array $options): void
+{
+    if (!class_exists(RuntimeConfig::class)) {
+        return;
+    }
+
+    $cfg = $options['config'] ?? ($options['config-file'] ?? null);
+    if ($cfg === true) {
+        $cfg = '';
+    }
+
+    if (is_string($cfg) && trim($cfg) !== '' && $cfg !== '1') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+}
+
+function resolveDefaultStorageDir(string $workspaceRoot): string
+{
+    $workspaceRoot = rtrim($workspaceRoot, DIRECTORY_SEPARATOR);
+
+    $candidate = $workspaceRoot . DIRECTORY_SEPARATOR . 'blackcat-monitoring' . DIRECTORY_SEPARATOR . 'logs' . DIRECTORY_SEPARATOR . 'observability';
+    if (is_dir($candidate) || is_dir(dirname($candidate))) {
+        return $candidate;
+    }
+
+    return $workspaceRoot . DIRECTORY_SEPARATOR . 'blackcat-observability' . DIRECTORY_SEPARATOR . 'var';
+}
+
+/**
+ * @param array<string,string|bool> $options
+ */
+function resolveStorageDir(array $options, string $defaultStorage): string
+{
+    $explicit = $options['storage-dir'] ?? ($options['storage'] ?? null);
+    if ($explicit === true) {
+        $explicit = '';
+    }
+    if (is_string($explicit) && trim($explicit) !== '' && $explicit !== '1') {
+        return trim($explicit);
+    }
+
+    $runtime = runtimeStorageDir();
+    if ($runtime !== '') {
+        return $runtime;
+    }
+
+    return $defaultStorage;
+}
+
+function runtimeStorageDir(): string
+{
+    if (!class_exists(RuntimeConfig::class) || !RuntimeConfig::isInitialized()) {
+        return '';
+    }
+
+    $repo = RuntimeConfig::repo();
+    $raw = $repo->get('observability.storage_dir', '');
+    if (!is_string($raw)) {
+        return '';
+    }
+    $raw = trim($raw);
+    return $raw !== '' ? $raw : '';
+}
+
+/**
+ * @param array<string,string|bool> $options
+ * @return array<string,mixed>
+ */
+function buildRuntimeConfigSnippet(array $options, string $defaultStorage): array
+{
+    $service = $options['service'] ?? 'blackcat-app';
+    if ($service === true || !is_string($service) || trim($service) === '' || $service === '1') {
+        $service = 'blackcat-app';
+    }
+
+    $storage = $options['storage-dir'] ?? $defaultStorage;
+    if ($storage === true || !is_string($storage) || trim($storage) === '' || $storage === '1') {
+        $storage = $defaultStorage;
+    }
+
+    return [
+        'observability' => [
+            'service' => trim($service),
+            'storage_dir' => trim((string) $storage),
+        ],
+    ];
+}
+
+function openStore(string $storageDir): LocalStore
+{
+    try {
+        return new LocalStore($storageDir);
+    } catch (\Throwable $e) {
+        err($e->getMessage());
+        exit(2);
+    }
 }

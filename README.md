@@ -20,6 +20,7 @@ php bin/blackcat install shopping-list.json
 # proxies to installed component CLIs (when configured)
 php bin/blackcat crypto metrics:export prom
 php bin/blackcat observability events:tail
+php bin/blackcat observability config:print
 php bin/blackcat agent template shopping-list
 php bin/blackcat auth help
 php bin/blackcat db --help

@@ -508,6 +508,8 @@ final class BlackCatCli
             echo "observability\n";
             echo "Usage: blackcat observability <command> [args...]\n\n";
             echo "Commands:\n";
+            echo "  config:print       Print runtime config snippet (JSON)\n";
+            echo "  config:init        Write runtime config snippet to file\n";
             echo "  store:info         Local store paths + counts\n";
             echo "  events:tail        Print last N events\n";
             echo "  events:clear       Clear events file\n";
