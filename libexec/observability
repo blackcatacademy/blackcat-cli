@@ -1,0 +1,139 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Observability\Storage\LocalStore;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * observability
+ *
+ * Usage:
+ *   blackcat observability events:tail [--limit=10] [--storage-dir=DIR]
+ *   blackcat observability metrics:snapshot [--storage-dir=DIR]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+$cmd = (string)($positionals[0] ?? 'help');
+
+$workspaceRoot = dirname(__DIR__, 2);
+$defaultStorage = $workspaceRoot . '/blackcat-observability/var';
+$storageDir = (string)($options['storage-dir'] ?? ($options['storage'] ?? (getenv('OBS_STORAGE') ?: $defaultStorage)));
+
+try {
+    $store = new LocalStore($storageDir);
+} catch (\Throwable $e) {
+    err($e->getMessage());
+    exit(2);
+}
+
+switch ($cmd) {
+    case '':
+    case 'help':
+    case '--help':
+    case '-h':
+        usage();
+        exit(0);
+
+    case 'events:tail':
+        $limit = (int)($options['limit'] ?? 10);
+        if ($limit < 1) {
+            $limit = 10;
+        }
+        $events = $store->events();
+        $slice = array_slice($events, -$limit);
+        echo json_encode($slice, JSON_PRETTY_PRINT) . PHP_EOL;
+        exit(0);
+
+    case 'metrics:snapshot':
+        $metrics = $store->metrics();
+        $aggregate = [];
+        foreach ($metrics as $metric) {
+            $name = is_string($metric['name'] ?? null) ? (string) $metric['name'] : 'unknown';
+            $rawValue = $metric['value'] ?? 0;
+            $value = is_numeric($rawValue) ? (float) $rawValue : 0.0;
+            $aggregate[$name] = ($aggregate[$name] ?? 0) + $value;
+        }
+        echo json_encode($aggregate, JSON_PRETTY_PRINT) . PHP_EOL;
+        exit(0);
+
+    default:
+        err("Unknown command: {$cmd}");
+        usage();
+        exit(1);
+}
+
+function usage(): void
+{
+    out('observability');
+    out('Usage: blackcat observability <command> [options]');
+    out('');
+    out('Commands:');
+    out('  events:tail        Print last N events as JSON');
+    out('  metrics:snapshot   Aggregate metrics by name');
+    out('');
+    out('Options:');
+    out('  --storage-dir=DIR  Override local store directory');
+    out('  --limit=N          Tail limit (events:tail, default: 10)');
+}
+
+function out(string $line): void
+{
+    echo $line . PHP_EOL;
+}
+
+function err(string $line): void
+{
+    fwrite(STDERR, $line . PHP_EOL);
+}
+
+/**
+ * @param string[] $args
+ * @return array{0:array<string,string|bool>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    /** @var array<string,string|bool> $options */
+    $options = [];
+    /** @var list<string> $positionals */
+    $positionals = [];
+
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if ($arg === '--') {
+            $positionals = array_merge($positionals, $args);
+            break;
+        }
+
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--')) {
+            $pair = explode('=', substr($arg, 2), 2);
+            $key = $pair[0] ?? '';
+            if ($key === '') {
+                continue;
+            }
+            if (count($pair) === 2) {
+                $options[$key] = (string) $pair[1];
+                continue;
+            }
+
+            $next = $args[0] ?? null;
+            if (is_string($next) && $next !== '' && !str_starts_with($next, '-')) {
+                $options[$key] = (string) array_shift($args);
+            } else {
+                $options[$key] = true;
+            }
+            continue;
+        }
+
+        $positionals[] = $arg;
+    }
+
+    return [$options, $positionals];
+}

@@ -330,6 +330,8 @@ final class BlackCatCli
         return match ($spec->command()) {
             'db' => $this->runDb($args),
             'db-crypto' => $this->runDbCrypto($args),
+            'monitoring' => $this->runMonitoring($args),
+            'observability' => $this->runObservability($args),
             default => $this->unknownBuiltin($spec->command()),
         };
     }
@@ -439,6 +441,76 @@ final class BlackCatCli
         };
 
         $cmd = array_merge([PHP_BINARY, $script], $passThrough);
+        return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runMonitoring(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+        $rest = array_slice($args, 1);
+
+        $cliRoot = dirname(__DIR__);
+        $libexec = $cliRoot . '/libexec';
+
+        $script = match ($sub) {
+            'help', '--help', '-h' => null,
+            'stack' => $libexec . '/monitoring-stack',
+            default => '',
+        };
+
+        if ($script === null) {
+            echo "monitoring\n";
+            echo "Usage: blackcat monitoring <subcommand> [args...]\n\n";
+            echo "Subcommands:\n";
+            echo "  stack   Manage local monitoring dev stack (docker compose)\n";
+            echo "\nExamples:\n";
+            echo "  blackcat monitoring stack info\n";
+            echo "  blackcat monitoring stack up --pull\n";
+            echo "  blackcat monitoring stack status\n";
+            return 0;
+        }
+
+        if ($script === '' || !is_file($script)) {
+            fwrite(STDERR, "monitoring subcommand not found: {$sub}\n");
+            return 1;
+        }
+
+        $cmd = array_merge([PHP_BINARY, $script], $rest);
+        return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runObservability(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+
+        $cliRoot = dirname(__DIR__);
+        $libexec = $cliRoot . '/libexec';
+        $script = $libexec . '/observability';
+
+        if ($sub === 'help' || $sub === '--help' || $sub === '-h') {
+            echo "observability\n";
+            echo "Usage: blackcat observability <command> [args...]\n\n";
+            echo "Commands:\n";
+            echo "  events:tail        Print last N events\n";
+            echo "  metrics:snapshot   Aggregate local metrics\n";
+            echo "\nExamples:\n";
+            echo "  blackcat observability events:tail --limit=25\n";
+            echo "  blackcat observability metrics:snapshot\n";
+            return 0;
+        }
+
+        if (!is_file($script)) {
+            fwrite(STDERR, "observability runner not found: {$script}\n");
+            return 1;
+        }
+
+        $cmd = array_merge([PHP_BINARY, $script], $args);
         return $this->runProcess($cmd);
     }
 

@@ -1,0 +1,172 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * monitoring stack
+ *
+ * Usage:
+ *   blackcat monitoring stack info
+ *   blackcat monitoring stack up [--pull] [--project=blackcat_obs] [--compose=FILE]
+ *   blackcat monitoring stack down [--project=blackcat_obs] [--compose=FILE]
+ *   blackcat monitoring stack status [--project=blackcat_obs] [--compose=FILE]
+ *   blackcat monitoring stack restart [--pull] [--project=blackcat_obs] [--compose=FILE]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+$action = (string)($positionals[0] ?? 'help');
+
+$workspaceRoot = dirname(__DIR__, 2);
+$composeFile = (string)($options['compose'] ?? '');
+if ($composeFile === '') {
+    $composeFile = $workspaceRoot . '/blackcat-monitoring/stack/dev/docker-compose.yml';
+}
+
+if (!is_file($composeFile)) {
+    err("Compose file not found: {$composeFile}");
+    exit(2);
+}
+
+$project = (string)($options['project'] ?? 'blackcat_obs');
+$pull = array_key_exists('pull', $options);
+
+switch ($action) {
+    case '':
+    case 'help':
+    case '--help':
+    case '-h':
+        usage();
+        exit(0);
+
+    case 'info':
+        out("Monitoring dev stack:");
+        out("  Grafana:     http://localhost:3000  (admin / devpass)");
+        out("  Prometheus:  http://localhost:9090");
+        out("  Loki:        http://localhost:3100");
+        out('');
+        out("Compose file: {$composeFile}");
+        out("Project:      {$project}");
+        exit(0);
+
+    case 'up':
+        if ($pull) {
+            $code = runDockerCompose($composeFile, $project, ['pull']);
+            if ($code !== 0) {
+                exit($code);
+            }
+        }
+        exit(runDockerCompose($composeFile, $project, ['up', '-d', '--remove-orphans']));
+
+    case 'down':
+        exit(runDockerCompose($composeFile, $project, ['down']));
+
+    case 'status':
+    case 'ps':
+        exit(runDockerCompose($composeFile, $project, ['ps']));
+
+    case 'restart':
+        $code = runDockerCompose($composeFile, $project, ['down']);
+        if ($code !== 0) {
+            exit($code);
+        }
+        if ($pull) {
+            $code = runDockerCompose($composeFile, $project, ['pull']);
+            if ($code !== 0) {
+                exit($code);
+            }
+        }
+        exit(runDockerCompose($composeFile, $project, ['up', '-d', '--remove-orphans']));
+
+    default:
+        err("Unknown stack action: {$action}");
+        usage();
+        exit(1);
+}
+
+/**
+ * @param string[] $args
+ */
+function runDockerCompose(string $composeFile, string $project, array $args): int
+{
+    $cmd = array_merge(['docker', 'compose', '-f', $composeFile, '-p', $project], $args);
+    $proc = proc_open($cmd, [0 => STDIN, 1 => STDOUT, 2 => STDERR], $pipes);
+    if (!is_resource($proc)) {
+        err('Failed to start docker compose.');
+        return 1;
+    }
+    return proc_close($proc);
+}
+
+function usage(): void
+{
+    out('monitoring stack');
+    out('Usage: blackcat monitoring stack <info|up|down|status|restart> [options]');
+    out('');
+    out('Options:');
+    out('  --compose=FILE            Override compose file path');
+    out('  --project=NAME            Docker Compose project name (default: blackcat_obs)');
+    out('  --pull                    Pull images before up/restart');
+}
+
+function out(string $line): void
+{
+    echo $line . PHP_EOL;
+}
+
+function err(string $line): void
+{
+    fwrite(STDERR, $line . PHP_EOL);
+}
+
+/**
+ * @param string[] $args
+ * @return array{0:array<string,string|bool>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    /** @var array<string,string|bool> $options */
+    $options = [];
+    /** @var list<string> $positionals */
+    $positionals = [];
+
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if ($arg === '--') {
+            $positionals = array_merge($positionals, $args);
+            break;
+        }
+
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--')) {
+            $pair = explode('=', substr($arg, 2), 2);
+            $key = $pair[0] ?? '';
+            if ($key === '') {
+                continue;
+            }
+            if (count($pair) === 2) {
+                $options[$key] = (string) $pair[1];
+                continue;
+            }
+
+            $next = $args[0] ?? null;
+            if (is_string($next) && $next !== '' && !str_starts_with($next, '-')) {
+                $options[$key] = (string) array_shift($args);
+            } else {
+                $options[$key] = true;
+            }
+            continue;
+        }
+
+        $positionals[] = $arg;
+    }
+
+    return [$options, $positionals];
+}
+
