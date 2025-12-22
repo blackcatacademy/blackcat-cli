@@ -60,11 +60,6 @@ return [
             'script' => getenv('BLACKCAT_AUTH_BIN') ?: ($workspaceRoot . '/blackcat-auth/bin/auth'),
             'args' => [],
         ],
-        'db' => [
-            'runner' => 'php',
-            'script' => getenv('BLACKCAT_DB_BIN') ?: ($workspaceRoot . '/blackcat-database/bin/dbctl.php'),
-            'args' => [],
-        ],
         'governance' => [
             'runner' => 'php',
             'script' => getenv('BLACKCAT_GOVERNANCE_BIN') ?: ($workspaceRoot . '/blackcat-governance/bin/governance'),

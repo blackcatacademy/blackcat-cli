@@ -328,6 +328,7 @@ final class BlackCatCli
     private function runBuiltin(CommandSpec $spec, array $args): int
     {
         return match ($spec->command()) {
+            'db' => $this->runDb($args),
             'db-crypto' => $this->runDbCrypto($args),
             default => $this->unknownBuiltin($spec->command()),
         };
@@ -384,6 +385,60 @@ final class BlackCatCli
         }
 
         $cmd = array_merge([PHP_BINARY, $script], $rest);
+        return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runDb(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+        $rest = array_slice($args, 1);
+
+        $cliRoot = dirname(__DIR__);
+        $libexec = $cliRoot . '/libexec';
+
+        $script = match ($sub) {
+            'help', '--help', '-h' => null,
+            'doctor' => $libexec . '/db-doctor',
+            'outbox-worker', 'outbox' => $libexec . '/db-outbox-worker',
+            default => $libexec . '/db',
+        };
+
+        if ($script === null) {
+            echo "db\n";
+            echo "Usage: blackcat db <subcommand> [args...]\n\n";
+            echo "Subcommands:\n";
+            echo "  ping           DB ping (requires db config)\n";
+            echo "  explain        Explain SQL plan\n";
+            echo "  route          Run query via primary/replica\n";
+            echo "  wait-replica   Wait for replica to catch up\n";
+            echo "  trace          Dump last queries (this process)\n";
+            echo "  doctor         Print DB snapshot (driver/server/replica)\n";
+            echo "  outbox-worker  Drain outbox table (stdout/webhook)\n";
+            echo "\nDB config sources (priority):\n";
+            echo "  1) --bootstrap=FILE  (your bootstrap calls Database::init)\n";
+            echo "  2) --dsn=... [--user=... --password=...]\n";
+            echo "  3) runtime config JSON: db.dsn, db.user, db.password (pass --config=FILE)\n";
+            echo "\nExamples:\n";
+            echo "  blackcat db ping --dsn=\"mysql:host=localhost;dbname=app;charset=utf8mb4\"\n";
+            echo "  blackcat db explain \"SELECT 1\" --analyze\n";
+            echo "  blackcat db outbox-worker --batch=200 --sleep-ms=500 --once\n";
+            return 0;
+        }
+
+        if (!is_file($script)) {
+            fwrite(STDERR, "db subcommand not found: {$sub}\n");
+            return 1;
+        }
+
+        $passThrough = match ($sub) {
+            'doctor', 'outbox-worker', 'outbox' => $rest,
+            default => $args,
+        };
+
+        $cmd = array_merge([PHP_BINARY, $script], $passThrough);
         return $this->runProcess($cmd);
     }
 

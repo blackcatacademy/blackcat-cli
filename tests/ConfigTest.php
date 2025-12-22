@@ -23,6 +23,5 @@ final class ConfigTest extends TestCase
 
         $commands = $config->commands();
         self::assertArrayHasKey('crypto', $commands);
-        self::assertArrayHasKey('db', $commands);
     }
 }

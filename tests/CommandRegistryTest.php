@@ -9,6 +9,38 @@ use PHPUnit\Framework\TestCase;
 
 final class CommandRegistryTest extends TestCase
 {
+    public function testLoadsManifestFromWorkspaceRootItself(): void
+    {
+        $root = sys_get_temp_dir() . '/blackcat-cli-registry-' . bin2hex(random_bytes(4));
+        mkdir($root, 0777, true);
+
+        file_put_contents($root . '/blackcat-cli.json', json_encode([
+            'schema_version' => 1,
+            'component' => [
+                'id' => 'blackcat-dbcrypto',
+                'name' => 'BlackCat DB Crypto',
+            ],
+            'cli' => [
+                'entrypoints' => [
+                    [
+                        'id' => 'db-crypto',
+                        'command' => 'db-crypto',
+                        'summary' => 'DB crypto tools',
+                        'type' => 'builtin',
+                    ],
+                ],
+            ],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL);
+
+        $registry = CommandRegistry::fromWorkspaceRoot($root);
+        self::assertSame([], $registry->errors());
+
+        $spec = $registry->find('db-crypto');
+        self::assertNotNull($spec);
+        self::assertTrue($spec->isBuiltin());
+        self::assertSame('blackcat-dbcrypto', $spec->componentId());
+    }
+
     public function testLoadsValidManifestFromWorkspaceRoot(): void
     {
         $root = sys_get_temp_dir() . '/blackcat-cli-registry-' . bin2hex(random_bytes(4));
@@ -77,4 +109,3 @@ final class CommandRegistryTest extends TestCase
         self::assertNotNull($registry->find('dup'));
     }
 }
-

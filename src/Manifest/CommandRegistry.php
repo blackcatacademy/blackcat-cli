@@ -36,12 +36,26 @@ final class CommandRegistry
             ]);
         }
 
-        $glob = rtrim($workspaceRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'blackcat-*' . DIRECTORY_SEPARATOR . 'blackcat-cli.json';
-        $paths = glob($glob) ?: [];
+        $workspaceRoot = rtrim($workspaceRoot, DIRECTORY_SEPARATOR);
+
+        $paths = [];
+
+        // Allow single-repo workspaces where the component manifest lives at the workspace root.
+        $rootManifest = $workspaceRoot . DIRECTORY_SEPARATOR . 'blackcat-cli.json';
+        if (is_file($rootManifest)) {
+            $paths[] = $rootManifest;
+        }
+
+        $glob = $workspaceRoot . DIRECTORY_SEPARATOR . 'blackcat-*' . DIRECTORY_SEPARATOR . 'blackcat-cli.json';
+        $globbed = glob($glob);
+        if (is_array($globbed)) {
+            $paths = array_merge($paths, $globbed);
+        }
+        $paths = array_values(array_unique($paths));
         sort($paths);
 
         foreach ($paths as $manifestPath) {
-            if (!is_string($manifestPath) || $manifestPath === '' || !is_file($manifestPath)) {
+            if (!is_file($manifestPath)) {
                 continue;
             }
 
@@ -220,4 +234,3 @@ final class CommandRegistry
         return rtrim($componentRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $script);
     }
 }
-

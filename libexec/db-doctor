@@ -1,0 +1,214 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+use BlackCat\Core\Database;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * Print a quick DB health snapshot (driver, server version, replica status, ping).
+ */
+
+$args = array_slice($argv, 1);
+[$options] = parseArgs($args);
+
+initRuntimeConfig($options);
+requireBootstrapIfProvided($options);
+
+try {
+    ensureDatabaseInitialized($options);
+
+    if (!Database::isInitialized()) {
+        fwrite(STDERR, "Database not initialized. Provide --bootstrap=FILE, --dsn=..., or runtime config db.dsn.\n");
+        exit(2);
+    }
+
+    $db = Database::getInstance();
+
+    $info = [
+        'dsn' => $db->id(),
+        'driver' => $db->driver(),
+        'server' => $db->serverVersion(),
+        'replica' => $db->replicaStatus(),
+    ];
+
+    $ok = $db->ping();
+    $info['ping'] = $ok ? 'ok' : 'fail';
+
+    echo json_encode($info, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+    exit($ok ? 0 : 1);
+} catch (Throwable $e) {
+    fwrite(STDERR, 'db-doctor error: ' . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
+
+/**
+ * @param list<string> $args
+ * @return array{0:array<string,string>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    $options = [];
+    $positionals = [];
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, '--')) {
+            [$key, $value] = array_pad(explode('=', substr($arg, 2), 2), 2, '1');
+            $options[$key] = $value;
+            continue;
+        }
+        $positionals[] = $arg;
+    }
+    return [$options, $positionals];
+}
+
+/**
+ * Initialize blackcat-config runtime config for CLI tools.
+ *
+ * @param array<string,string> $options
+ */
+function initRuntimeConfig(array $options): void
+{
+    $cfg = $options['config'] ?? ($options['config-file'] ?? null);
+    if ($cfg === '1') {
+        $cfg = '';
+    }
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function requireBootstrapIfProvided(array $options): void
+{
+    $bootstrap = $options['bootstrap'] ?? '';
+    if ($bootstrap === '1') {
+        $bootstrap = '';
+    }
+    if (!is_string($bootstrap) || trim($bootstrap) === '') {
+        return;
+    }
+
+    $path = trim($bootstrap);
+    if (!is_file($path)) {
+        throw new RuntimeException('Bootstrap file not found: ' . $path);
+    }
+
+    require $path;
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function ensureDatabaseInitialized(array $options): void
+{
+    if (Database::isInitialized()) {
+        return;
+    }
+
+    $dsn = resolveDbDsn($options);
+    if ($dsn === '') {
+        return;
+    }
+
+    Database::init([
+        'dsn' => $dsn,
+        'user' => resolveDbUser($options),
+        'pass' => resolveDbPassword($options),
+        'appName' => 'blackcat-cli:db',
+    ]);
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveDbDsn(array $options): string
+{
+    $dsn = $options['dsn'] ?? '';
+    if ($dsn === '1') {
+        $dsn = '';
+    }
+    if (is_string($dsn) && trim($dsn) !== '') {
+        return trim($dsn);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('db.dsn');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+    }
+
+    $env = getenv('DB_DSN');
+    if (is_string($env) && trim($env) !== '') {
+        return trim($env);
+    }
+
+    return '';
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveDbUser(array $options): ?string
+{
+    $user = $options['user'] ?? '';
+    if ($user === '1') {
+        $user = '';
+    }
+    if (is_string($user) && trim($user) !== '') {
+        return trim($user);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('db.user');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+    }
+
+    $env = getenv('DB_USER');
+    if (is_string($env) && trim($env) !== '') {
+        return trim($env);
+    }
+
+    return null;
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveDbPassword(array $options): ?string
+{
+    $pass = $options['password'] ?? ($options['pass'] ?? '');
+    if ($pass === '1') {
+        $pass = '';
+    }
+    if (is_string($pass) && trim($pass) !== '') {
+        return trim($pass);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        foreach (['db.password', 'db.pass'] as $key) {
+            $v = RuntimeConfig::get($key);
+            if (is_string($v) && trim($v) !== '') {
+                return trim($v);
+            }
+        }
+    }
+
+    foreach (['DB_PASSWORD', 'DB_PASS'] as $key) {
+        $env = getenv($key);
+        if (is_string($env) && trim($env) !== '') {
+            return trim($env);
+        }
+    }
+
+    return null;
+}
