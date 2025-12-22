@@ -45,11 +45,6 @@ return [
             'script' => getenv('BLACKCAT_AGENT_BIN') ?: ($workspaceRoot . '/blackcat-agent/bin/agent'),
             'args' => [],
         ],
-        'crypto' => [
-            'runner' => 'php',
-            'script' => getenv('BLACKCAT_CRYPTO_BIN') ?: ($workspaceRoot . '/blackcat-crypto/bin/crypto'),
-            'args' => [],
-        ],
         'auth' => [
             'runner' => 'php',
             'script' => getenv('BLACKCAT_AUTH_BIN') ?: ($workspaceRoot . '/blackcat-auth/bin/auth'),

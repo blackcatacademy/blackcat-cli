@@ -22,6 +22,7 @@ final class ConfigTest extends TestCase
         self::assertNotSame([], $allowed);
 
         $commands = $config->commands();
-        self::assertArrayHasKey('crypto', $commands);
+        self::assertArrayHasKey('agent', $commands);
+        self::assertArrayNotHasKey('crypto', $commands);
     }
 }

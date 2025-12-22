@@ -330,6 +330,7 @@ final class BlackCatCli
         return match ($spec->command()) {
             'db' => $this->runDb($args),
             'db-crypto' => $this->runDbCrypto($args),
+            'crypto' => $this->runCrypto($args),
             'monitoring' => $this->runMonitoring($args),
             'observability' => $this->runObservability($args),
             'usage' => $this->runUsage($args),
@@ -508,6 +509,23 @@ final class BlackCatCli
 
         if (!is_file($script)) {
             fwrite(STDERR, "observability runner not found: {$script}\n");
+            return 1;
+        }
+
+        $cmd = array_merge([PHP_BINARY, $script], $args);
+        return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runCrypto(array $args): int
+    {
+        $cliRoot = dirname(__DIR__);
+        $script = $cliRoot . '/libexec/crypto';
+
+        if (!is_file($script)) {
+            fwrite(STDERR, "crypto runner not found: {$script}\n");
             return 1;
         }
 
