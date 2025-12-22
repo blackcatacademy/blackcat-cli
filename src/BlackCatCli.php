@@ -352,6 +352,7 @@ final class BlackCatCli
             'db' => $this->runDb($args),
             'db-crypto' => $this->runDbCrypto($args),
             'crypto' => $this->runCrypto($args),
+            'config' => $this->runConfig($args),
             'monitoring' => $this->runMonitoring($args),
             'observability' => $this->runObservability($args),
             'usage' => $this->runUsage($args),
@@ -602,6 +603,235 @@ final class BlackCatCli
 
         $cmd = array_merge([PHP_BINARY, $script], $args);
         return $this->runProcess($cmd);
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfig(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+        $rest = array_slice($args, 1);
+
+        if ($sub === 'help' || $sub === '--help' || $sub === '-h' || $sub === '') {
+            echo "config\n";
+            echo "Usage: blackcat config <subcommand> [args...]\n\n";
+            echo "Subcommands:\n";
+            echo "  runtime paths                 Print read/write candidate paths\n";
+            echo "  runtime recommend             Recommend best write location\n";
+            echo "  runtime init [--force]        Create runtime config at best location\n";
+            echo "         [--path=FILE]          Force specific path\n";
+            echo "         [--json]               JSON output\n";
+            echo "\nExamples:\n";
+            echo "  blackcat config runtime recommend\n";
+            echo "  blackcat config runtime init\n";
+            echo "  blackcat config runtime init --path=/etc/blackcat/config.runtime.json --force\n";
+            return 0;
+        }
+
+        $cmd = $sub;
+        if ($cmd === 'runtime') {
+            $action = (string) ($rest[0] ?? 'help');
+            if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+                echo "config runtime\n";
+                echo "Usage: blackcat config runtime <paths|recommend|init> [options]\n\n";
+                echo "Subcommands:\n";
+                echo "  paths                 Print read/write candidate paths\n";
+                echo "  recommend             Recommend best write location\n";
+                echo "  init [--force]        Create runtime config at best location\n";
+                echo "       [--path=FILE]    Force specific path\n";
+                echo "       [--json]         JSON output\n";
+                return 0;
+            }
+            $rest = array_slice($rest, 1);
+            $cmd = 'runtime ' . $action;
+        }
+
+        return match ($cmd) {
+            'runtime paths' => $this->runConfigRuntimePaths($rest),
+            'runtime recommend' => $this->runConfigRuntimeRecommend($rest),
+            'runtime init' => $this->runConfigRuntimeInit($rest),
+            default => $this->unknown('config ' . $sub),
+        };
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigRuntimePaths(array $args): int
+    {
+        [$json, $remaining] = $this->consumeFlag($args, '--json');
+        if ($remaining !== []) {
+            fwrite(STDERR, "config runtime paths does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $write = \BlackCat\Config\Runtime\RuntimeConfigInstaller::defaultWritePaths();
+        $read = \BlackCat\Config\Runtime\ConfigBootstrap::defaultJsonPaths();
+
+        if ($json) {
+            echo json_encode(['write_paths' => $write, 'read_paths' => $read], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return 0;
+        }
+
+        echo "Runtime config paths\n";
+        echo "Write candidates:\n";
+        foreach ($write as $p) {
+            echo "  - {$p}\n";
+        }
+        echo "\nRead candidates:\n";
+        foreach ($read as $p) {
+            echo "  - {$p}\n";
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigRuntimeRecommend(array $args): int
+    {
+        [$json, $remaining] = $this->consumeFlag($args, '--json');
+        if ($remaining !== []) {
+            fwrite(STDERR, "config runtime recommend does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $rec = \BlackCat\Config\Runtime\RuntimeConfigInstaller::recommendWritePath();
+
+        if ($json) {
+            echo json_encode($rec, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return 0;
+        }
+
+        $path = $rec['path'] ?? null;
+        if (!is_string($path) || $path === '') {
+            fwrite(STDERR, "No recommended runtime config path found.\n");
+            return 2;
+        }
+
+        echo "Recommended runtime config path:\n";
+        echo "  {$path}\n";
+        echo "Reason:\n";
+        echo "  " . $rec['reason'] . "\n";
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigRuntimeInit(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$force, $args] = $this->consumeFlag($args, '--force');
+
+        $path = null;
+        $filtered = [];
+        $expectPath = false;
+
+        foreach ($args as $arg) {
+            if ($expectPath) {
+                $expectPath = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $candidate;
+                continue;
+            }
+
+            if ($arg === '--path') {
+                $expectPath = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--path=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $val;
+                continue;
+            }
+
+            $filtered[] = $arg;
+        }
+
+        if ($expectPath) {
+            fwrite(STDERR, "Missing value for --path\n");
+            return 1;
+        }
+
+        if ($filtered !== []) {
+            fwrite(STDERR, "config runtime init does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $res = \BlackCat\Config\Runtime\RuntimeConfigInstaller::init([], $path, $force);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        if ($json) {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return 0;
+        }
+
+        echo "Runtime config initialized:\n";
+        echo "  path:    " . $res['path'] . "\n";
+        echo "  created: " . ($res['created'] ? 'yes' : 'no') . "\n";
+        if ($res['rejected'] !== []) {
+            echo "Rejected candidates:\n";
+            /** @var array<string,string> $rej */
+            $rej = $res['rejected'];
+            foreach ($rej as $p => $reason) {
+                echo "  - {$p}: {$reason}\n";
+            }
+        }
+        return 0;
+    }
+
+    private function ensureBlackcatConfigAvailable(): bool
+    {
+        if (class_exists('\\BlackCat\\Config\\Runtime\\RuntimeConfigInstaller', false)) {
+            return true;
+        }
+
+        $autoload = $this->config->workspaceRoot() . '/blackcat-config/src/autoload.php';
+        if (is_file($autoload)) {
+            require_once $autoload;
+        }
+
+        if (class_exists('\\BlackCat\\Config\\Runtime\\RuntimeConfigInstaller')) {
+            return true;
+        }
+
+        fwrite(STDERR, "blackcat-config is not available (install it or add it to the workspace).\n");
+        return false;
     }
 
     /**

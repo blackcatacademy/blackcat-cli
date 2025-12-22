@@ -30,6 +30,10 @@ php bin/blackcat security checklist stride
 # built-in (manifest-discovered) db-crypto tooling
 php bin/blackcat db-crypto plan --schema-source=packages
 php bin/blackcat db-crypto telemetry --out=telemetry/db-crypto-metrics.json
+
+# built-in runtime config tooling (when blackcat-config is present)
+php bin/blackcat config runtime recommend
+php bin/blackcat config runtime init --force
 ```
 
 ## Manifest discovery (Stage 2)

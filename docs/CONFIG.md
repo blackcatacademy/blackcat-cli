@@ -26,6 +26,17 @@ $install = $config->command('install');
 
 Note: `--config`/`--config-file` is reserved for **runtime config** (blackcat-config) and is forwarded to component tools that support it.
 
+## Runtime config (blackcat-config)
+
+When `blackcat-config` is present in the workspace, `blackcat-cli` exposes built-in helpers:
+
+```bash
+php bin/blackcat config runtime paths
+php bin/blackcat config runtime recommend
+php bin/blackcat config runtime init --force
+php bin/blackcat config runtime init --path=/etc/blackcat/config.runtime.json --force
+```
+
 ## Manifest discovery (Stage 2)
 
 Component repositories can declare CLI capabilities in `blackcat-cli.json` at repo root.
