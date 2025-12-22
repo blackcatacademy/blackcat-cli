@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use BlackCat\Observability\Storage\LocalStore;
+use BlackCat\Observability\Export\PrometheusTextExporter;
+use BlackCat\Observability\Metrics\MetricsAggregator;
 
 require __DIR__ . '/bootstrap.php';
 
@@ -10,8 +12,13 @@ require __DIR__ . '/bootstrap.php';
  * observability
  *
  * Usage:
+ *   blackcat observability store:info [--storage-dir=DIR]
  *   blackcat observability events:tail [--limit=10] [--storage-dir=DIR]
+ *   blackcat observability events:clear [--storage-dir=DIR]
  *   blackcat observability metrics:snapshot [--storage-dir=DIR]
+ *   blackcat observability metrics:tail [--limit=10] [--storage-dir=DIR]
+ *   blackcat observability metrics:clear [--storage-dir=DIR]
+ *   blackcat observability metrics:export [prom|json] [--no-service-label] [--storage-dir=DIR]
  */
 
 $args = array_slice($argv, 1);
@@ -38,6 +45,39 @@ switch ($cmd) {
         usage();
         exit(0);
 
+    case 'store:info':
+        $eventsPath = $store->eventsFilePath();
+        $metricsPath = $store->metricsFilePath();
+
+        $events = $store->events();
+        $metrics = $store->metrics();
+
+        $eventsCount = count($events);
+        $metricsCount = count($metrics);
+
+        $eventsSize = is_file($eventsPath) ? (int) @filesize($eventsPath) : 0;
+        $metricsSize = is_file($metricsPath) ? (int) @filesize($metricsPath) : 0;
+
+        $lastEventTs = $eventsCount > 0 ? (int) ($events[$eventsCount - 1]['timestamp'] ?? 0) : 0;
+        $lastMetricTs = $metricsCount > 0 ? (int) ($metrics[$metricsCount - 1]['timestamp'] ?? 0) : 0;
+
+        echo json_encode([
+            'storage_dir' => $store->storageDir(),
+            'events' => [
+                'path' => $eventsPath,
+                'count' => $eventsCount,
+                'bytes' => $eventsSize,
+                'last_ts' => $lastEventTs ?: null,
+            ],
+            'metrics' => [
+                'path' => $metricsPath,
+                'count' => $metricsCount,
+                'bytes' => $metricsSize,
+                'last_ts' => $lastMetricTs ?: null,
+            ],
+        ], JSON_PRETTY_PRINT) . PHP_EOL;
+        exit(0);
+
     case 'events:tail':
         $limit = (int)($options['limit'] ?? 10);
         if ($limit < 1) {
@@ -48,16 +88,48 @@ switch ($cmd) {
         echo json_encode($slice, JSON_PRETTY_PRINT) . PHP_EOL;
         exit(0);
 
+    case 'events:clear':
+        $store->clearEvents();
+        out('OK');
+        exit(0);
+
     case 'metrics:snapshot':
         $metrics = $store->metrics();
-        $aggregate = [];
-        foreach ($metrics as $metric) {
-            $name = is_string($metric['name'] ?? null) ? (string) $metric['name'] : 'unknown';
-            $rawValue = $metric['value'] ?? 0;
-            $value = is_numeric($rawValue) ? (float) $rawValue : 0.0;
-            $aggregate[$name] = ($aggregate[$name] ?? 0) + $value;
+        echo json_encode(MetricsAggregator::sumByName($metrics), JSON_PRETTY_PRINT) . PHP_EOL;
+        exit(0);
+
+    case 'metrics:tail':
+        $limit = (int)($options['limit'] ?? 10);
+        if ($limit < 1) {
+            $limit = 10;
         }
-        echo json_encode($aggregate, JSON_PRETTY_PRINT) . PHP_EOL;
+        $metrics = $store->metrics();
+        $slice = array_slice($metrics, -$limit);
+        echo json_encode($slice, JSON_PRETTY_PRINT) . PHP_EOL;
+        exit(0);
+
+    case 'metrics:clear':
+        $store->clearMetrics();
+        out('OK');
+        exit(0);
+
+    case 'metrics:export':
+        $format = strtolower(trim((string)($positionals[1] ?? 'prom')));
+        $noServiceLabel = array_key_exists('no-service-label', $options);
+
+        $metrics = $store->metrics();
+        if ($format === 'json') {
+            $series = MetricsAggregator::sumBySeries($metrics, !$noServiceLabel);
+            echo json_encode($series, JSON_PRETTY_PRINT) . PHP_EOL;
+            exit(0);
+        }
+        if ($format !== 'prom' && $format !== 'prometheus') {
+            err("Unsupported format: {$format}");
+            usage();
+            exit(1);
+        }
+
+        echo PrometheusTextExporter::export($metrics, !$noServiceLabel);
         exit(0);
 
     default:
@@ -72,12 +144,18 @@ function usage(): void
     out('Usage: blackcat observability <command> [options]');
     out('');
     out('Commands:');
+    out('  store:info         Print local store paths + counts');
     out('  events:tail        Print last N events as JSON');
+    out('  events:clear       Clear events file');
     out('  metrics:snapshot   Aggregate metrics by name');
+    out('  metrics:tail       Print last N metric events as JSON');
+    out('  metrics:clear      Clear metrics file');
+    out('  metrics:export     Export aggregated metrics (prom/json)');
     out('');
     out('Options:');
     out('  --storage-dir=DIR  Override local store directory');
     out('  --limit=N          Tail limit (events:tail, default: 10)');
+    out('  --no-service-label Omit the "service" label in metrics:export');
 }
 
 function out(string $line): void

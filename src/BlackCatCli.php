@@ -508,11 +508,17 @@ final class BlackCatCli
             echo "observability\n";
             echo "Usage: blackcat observability <command> [args...]\n\n";
             echo "Commands:\n";
+            echo "  store:info         Local store paths + counts\n";
             echo "  events:tail        Print last N events\n";
-            echo "  metrics:snapshot   Aggregate local metrics\n";
+            echo "  events:clear       Clear events file\n";
+            echo "  metrics:snapshot   Aggregate metrics by name\n";
+            echo "  metrics:tail       Print last N metric events\n";
+            echo "  metrics:clear      Clear metrics file\n";
+            echo "  metrics:export     Export aggregated metrics (prom/json)\n";
             echo "\nExamples:\n";
             echo "  blackcat observability events:tail --limit=25\n";
             echo "  blackcat observability metrics:snapshot\n";
+            echo "  blackcat observability metrics:export prom\n";
             return 0;
         }
 
