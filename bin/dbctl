@@ -1,0 +1,15 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/../src/autoload.php';
+
+// Compatibility wrapper for legacy callers.
+// Old path: blackcat-database/bin/dbctl.php
+// New canonical: blackcat db ...
+
+$argv = $argv ?? [];
+array_splice($argv, 1, 0, ['db']);
+
+exit(BlackCat\Cli\BlackCatCli::run($argv));
+
