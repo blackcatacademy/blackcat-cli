@@ -460,6 +460,9 @@ final class BlackCatCli
         $script = match ($sub) {
             'help', '--help', '-h' => null,
             'stack' => $libexec . '/monitoring-stack',
+            'k8s' => $libexec . '/monitoring-k8s',
+            'infra' => $libexec . '/monitoring-infra',
+            'provisioning', 'assets' => $libexec . '/monitoring-provisioning',
             default => '',
         };
 
@@ -467,11 +470,17 @@ final class BlackCatCli
             echo "monitoring\n";
             echo "Usage: blackcat monitoring <subcommand> [args...]\n\n";
             echo "Subcommands:\n";
-            echo "  stack   Manage local monitoring dev stack (docker compose)\n";
+            echo "  stack         Manage local monitoring dev stack (docker compose)\n";
+            echo "  k8s           Kubernetes manifests (list/apply/diff/validate)\n";
+            echo "  infra         Terraform helper (init/plan/apply/destroy)\n";
+            echo "  provisioning  Grafana dashboards (list/print/path)\n";
             echo "\nExamples:\n";
             echo "  blackcat monitoring stack info\n";
             echo "  blackcat monitoring stack up --pull\n";
             echo "  blackcat monitoring stack status\n";
+            echo "  blackcat monitoring k8s list\n";
+            echo "  blackcat monitoring infra plan\n";
+            echo "  blackcat monitoring provisioning list\n";
             return 0;
         }
 

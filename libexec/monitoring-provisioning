@@ -1,0 +1,192 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * monitoring provisioning
+ *
+ * Usage:
+ *   blackcat monitoring provisioning list [--dir=PATH]
+ *   blackcat monitoring provisioning path <dashboard.json> [--dir=PATH]
+ *   blackcat monitoring provisioning print <dashboard.json> [--dir=PATH]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+$action = (string)($positionals[0] ?? 'help');
+$passThrough = array_slice($positionals, 1);
+
+$workspaceRoot = dirname(__DIR__, 2);
+$dir = (string)($options['dir'] ?? '');
+if ($dir === '') {
+    $dir = $workspaceRoot . '/blackcat-monitoring/provisioning/grafana/dashboards';
+}
+
+if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+    usage($dir);
+    exit(0);
+}
+
+if (!is_dir($dir)) {
+    err("Dashboards dir not found: {$dir}");
+    exit(2);
+}
+
+switch ($action) {
+    case 'list':
+    case 'ls':
+        $files = glob(rtrim($dir, '/\\') . '/*.json') ?: [];
+        $files = array_values(array_unique(array_filter($files, 'is_file')));
+        sort($files, SORT_STRING);
+
+        if ($files === []) {
+            out('No dashboards found.');
+            exit(0);
+        }
+
+        out("Dashboards in: {$dir}");
+        foreach ($files as $f) {
+            out('  - ' . basename($f));
+        }
+        exit(0);
+
+    case 'path':
+        $name = (string)($passThrough[0] ?? '');
+        if ($name === '') {
+            err('Usage: blackcat monitoring provisioning path <dashboard.json>');
+            exit(1);
+        }
+        $file = resolveDashboardPath($dir, $name);
+        if ($file === null) {
+            err("Dashboard not found: {$name}");
+            exit(2);
+        }
+        out($file);
+        exit(0);
+
+    case 'print':
+        $name = (string)($passThrough[0] ?? '');
+        if ($name === '') {
+            err('Usage: blackcat monitoring provisioning print <dashboard.json>');
+            exit(1);
+        }
+        $file = resolveDashboardPath($dir, $name);
+        if ($file === null) {
+            err("Dashboard not found: {$name}");
+            exit(2);
+        }
+        $raw = file_get_contents($file);
+        if ($raw === false) {
+            err("Unable to read dashboard: {$file}");
+            exit(2);
+        }
+        echo $raw;
+        if (!str_ends_with($raw, "\n")) {
+            echo "\n";
+        }
+        exit(0);
+
+    default:
+        err("Unknown action: {$action}");
+        usage($dir);
+        exit(1);
+}
+
+function resolveDashboardPath(string $dir, string $name): ?string
+{
+    $name = trim($name);
+    if ($name === '') {
+        return null;
+    }
+
+    $candidate = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . basename($name);
+    if (is_file($candidate)) {
+        return $candidate;
+    }
+
+    if (!str_ends_with($name, '.json')) {
+        $candidate2 = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . basename($name) . '.json';
+        if (is_file($candidate2)) {
+            return $candidate2;
+        }
+    }
+
+    return null;
+}
+
+function usage(string $dir): void
+{
+    out('monitoring provisioning');
+    out('Usage: blackcat monitoring provisioning <list|path|print> [args...]');
+    out('');
+    out('Options:');
+    out('  --dir=PATH            Dashboards dir (default: ' . $dir . ')');
+    out('');
+    out('Examples:');
+    out('  blackcat monitoring provisioning list');
+    out('  blackcat monitoring provisioning path bench.json');
+    out('  blackcat monitoring provisioning print bench.json > bench.json');
+}
+
+function out(string $line): void
+{
+    echo $line . PHP_EOL;
+}
+
+function err(string $line): void
+{
+    fwrite(STDERR, $line . PHP_EOL);
+}
+
+/**
+ * @param string[] $args
+ * @return array{0:array<string,string|bool>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    /** @var array<string,string|bool> $options */
+    $options = [];
+    /** @var list<string> $positionals */
+    $positionals = [];
+
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if ($arg === '--') {
+            $positionals = array_merge($positionals, array_values(array_filter($args, 'is_string')));
+            break;
+        }
+
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--')) {
+            $pair = explode('=', substr($arg, 2), 2);
+            $key = $pair[0] ?? '';
+            if ($key === '') {
+                continue;
+            }
+
+            if (count($pair) === 2) {
+                $options[$key] = (string) $pair[1];
+                continue;
+            }
+
+            $next = $args[0] ?? null;
+            if (is_string($next) && $next !== '' && !str_starts_with($next, '-')) {
+                $options[$key] = (string) array_shift($args);
+            } else {
+                $options[$key] = true;
+            }
+            continue;
+        }
+
+        $positionals[] = $arg;
+    }
+
+    return [$options, $positionals];
+}
+

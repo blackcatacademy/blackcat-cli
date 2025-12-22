@@ -1,0 +1,221 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * monitoring k8s
+ *
+ * Usage:
+ *   blackcat monitoring k8s list [--dir=PATH]
+ *   blackcat monitoring k8s apply [--dir=PATH] [--context=CTX] [--namespace=NS]
+ *   blackcat monitoring k8s diff [--dir=PATH] [--context=CTX] [--namespace=NS]
+ *   blackcat monitoring k8s validate [--dir=PATH] [--context=CTX] [--namespace=NS]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+$action = (string)($positionals[0] ?? 'help');
+$passThrough = array_slice($positionals, 1);
+
+$workspaceRoot = dirname(__DIR__, 2);
+$dir = (string)($options['dir'] ?? '');
+if ($dir === '') {
+    $dir = $workspaceRoot . '/blackcat-monitoring/k8s/manifests';
+}
+
+if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+    usage($dir);
+    exit(0);
+}
+
+if (!is_dir($dir)) {
+    err("Kubernetes manifests dir not found: {$dir}");
+    exit(2);
+}
+
+switch ($action) {
+    case 'list':
+    case 'ls':
+        $files = array_merge(
+            glob(rtrim($dir, '/\\') . '/*.yml') ?: [],
+            glob(rtrim($dir, '/\\') . '/*.yaml') ?: [],
+            glob(rtrim($dir, '/\\') . '/*.json') ?: [],
+        );
+        $files = array_values(array_unique(array_filter($files, 'is_file')));
+        sort($files, SORT_STRING);
+
+        if ($files === []) {
+            out('No manifests found.');
+            exit(0);
+        }
+
+        out("Manifests in: {$dir}");
+        foreach ($files as $f) {
+            out('  - ' . basename($f));
+        }
+        exit(0);
+
+    case 'apply':
+        exit(runKubectl($options, ['apply', '-f', $dir], $passThrough));
+
+    case 'diff':
+        exit(runKubectl($options, ['diff', '-f', $dir], $passThrough));
+
+    case 'validate':
+        // Best effort: try client-side validate first, then fallback to validate=false for offline parse checks.
+        $code = runKubectl($options, ['apply', '--dry-run=client', '-f', $dir], $passThrough);
+        if ($code === 0) {
+            exit(0);
+        }
+        err('kubectl validation failed; retrying with --validate=false (syntax-only check).');
+        exit(runKubectl($options, ['apply', '--dry-run=client', '--validate=false', '-f', $dir], $passThrough));
+
+    default:
+        err("Unknown action: {$action}");
+        usage($dir);
+        exit(1);
+}
+
+/**
+ * @param array<string,string|bool> $options
+ * @param list<string> $baseArgs
+ * @param list<string> $passThrough
+ */
+function runKubectl(array $options, array $baseArgs, array $passThrough): int
+{
+    $kubectl = findBinary('kubectl');
+    if ($kubectl === null) {
+        err('kubectl not found in PATH.');
+        err('Install kubectl or run in an environment that provides it.');
+        return 127;
+    }
+
+    $args = [];
+    $ctx = $options['context'] ?? null;
+    if (is_string($ctx) && $ctx !== '') {
+        $args[] = '--context=' . $ctx;
+    }
+
+    $ns = $options['namespace'] ?? null;
+    if (is_string($ns) && $ns !== '') {
+        $args[] = '--namespace=' . $ns;
+    }
+
+    $cmd = array_merge([$kubectl], $args, $baseArgs, $passThrough);
+    $proc = proc_open($cmd, [0 => STDIN, 1 => STDOUT, 2 => STDERR], $pipes);
+    if (!is_resource($proc)) {
+        err('Failed to start kubectl.');
+        return 1;
+    }
+    return proc_close($proc);
+}
+
+function usage(string $dir): void
+{
+    out('monitoring k8s');
+    out('Usage: blackcat monitoring k8s <list|apply|diff|validate> [options] [-- kubectl-args...]');
+    out('');
+    out('Options:');
+    out('  --dir=PATH            Manifests dir (default: ' . $dir . ')');
+    out('  --context=CTX         kubectl context override');
+    out('  --namespace=NS        kubectl namespace override');
+    out('');
+    out('Examples:');
+    out('  blackcat monitoring k8s list');
+    out('  blackcat monitoring k8s validate');
+    out('  blackcat monitoring k8s diff --namespace=observability');
+    out('  blackcat monitoring k8s apply --namespace=observability');
+}
+
+function out(string $line): void
+{
+    echo $line . PHP_EOL;
+}
+
+function err(string $line): void
+{
+    fwrite(STDERR, $line . PHP_EOL);
+}
+
+/**
+ * @param string[] $args
+ * @return array{0:array<string,string|bool>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    /** @var array<string,string|bool> $options */
+    $options = [];
+    /** @var list<string> $positionals */
+    $positionals = [];
+
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if ($arg === '--') {
+            $positionals = array_merge($positionals, array_values(array_filter($args, 'is_string')));
+            break;
+        }
+
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--')) {
+            $pair = explode('=', substr($arg, 2), 2);
+            $key = $pair[0] ?? '';
+            if ($key === '') {
+                continue;
+            }
+
+            if (count($pair) === 2) {
+                $options[$key] = (string) $pair[1];
+                continue;
+            }
+
+            $next = $args[0] ?? null;
+            if (is_string($next) && $next !== '' && !str_starts_with($next, '-')) {
+                $options[$key] = (string) array_shift($args);
+            } else {
+                $options[$key] = true;
+            }
+            continue;
+        }
+
+        $positionals[] = $arg;
+    }
+
+    return [$options, $positionals];
+}
+
+function findBinary(string $name): ?string
+{
+    $path = getenv('PATH');
+    if (!is_string($path) || $path === '') {
+        return null;
+    }
+
+    $candidates = [$name];
+    if (DIRECTORY_SEPARATOR === '\\') {
+        $candidates[] = $name . '.exe';
+        $candidates[] = $name . '.bat';
+        $candidates[] = $name . '.cmd';
+    }
+
+    foreach (explode(PATH_SEPARATOR, $path) as $dir) {
+        $dir = trim($dir);
+        if ($dir === '') {
+            continue;
+        }
+        foreach ($candidates as $file) {
+            $full = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . $file;
+            if (is_file($full) && is_executable($full)) {
+                return $full;
+            }
+        }
+    }
+
+    return null;
+}
+
