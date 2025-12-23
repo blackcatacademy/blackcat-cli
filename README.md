@@ -57,6 +57,7 @@ $install = $config->command('install');
 - `blackcat status [--json]` lists configured/discovered commands and their resolved targets.
 - `blackcat verify [--json] [--config=FILE]` performs security/integration checks (exit 2 on failure) and, when available, runs doctor-style checks:
   - validates runtime config via `blackcat-config` (when present)
+  - when crypto repos are present but runtime config is missing, prints a recommended path and suggests `blackcat config runtime init`
   - checks Prometheus targets (when `blackcat-monitoring` is present and Prometheus is reachable)
   - checks monitoring endpoints (Grafana/Loki/Promtail + exporters `/metrics`) when reachable
 

@@ -982,18 +982,15 @@ final class BlackCatCli
             ]];
         }
 
-        $checks = [];
-        $checks[] = [
-            'name' => 'runtime-config.file',
-            'status' => 'ok',
-            'message' => 'Runtime config initialized.',
-        ];
-
         try {
             if (is_string($runtimeConfigPath) && $runtimeConfigPath !== '') {
                 \BlackCat\Config\Runtime\Config::initFromJsonFileIfNeeded($runtimeConfigPath);
             } else {
-                \BlackCat\Config\Runtime\Config::tryInitFromFirstAvailableJsonFile();
+                $scan = \BlackCat\Config\Runtime\ConfigBootstrap::scanFirstAvailableJsonFile();
+                $repo = $scan['repo'] ?? null;
+                if ($repo instanceof \BlackCat\Config\Runtime\ConfigRepository) {
+                    \BlackCat\Config\Runtime\Config::initIfNeeded($repo);
+                }
             }
         } catch (\Throwable $e) {
             return [[
@@ -1004,14 +1001,48 @@ final class BlackCatCli
         }
 
         if (!\BlackCat\Config\Runtime\Config::isInitialized()) {
-            $status = $runtimeConfigPath !== null ? 'fail' : 'skip';
-            $checks[0] = [
+            $status = $needsCrypto ? 'fail' : 'skip';
+            $msg = 'No usable runtime config file found.';
+
+            try {
+                $scan = \BlackCat\Config\Runtime\ConfigBootstrap::scanFirstAvailableJsonFile();
+                $rej = $scan['rejected'];
+                if ($rej !== []) {
+                    $firstPath = (string) array_key_first($rej);
+                    $firstReason = $rej[$firstPath] ?? null;
+                    if (is_string($firstReason) && $firstReason !== '') {
+                        $msg .= ' Rejected: ' . $firstPath . ' (' . $firstReason . ').';
+                    }
+                }
+            } catch (\Throwable) {
+            }
+
+            if (class_exists('\\BlackCat\\Config\\Runtime\\RuntimeConfigInstaller')) {
+                try {
+                    $rec = \BlackCat\Config\Runtime\RuntimeConfigInstaller::recommendWritePath();
+                    $recPath = $rec['path'] ?? null;
+                    if (is_string($recPath) && $recPath !== '') {
+                        $msg .= ' Recommended path: ' . $recPath . '.';
+                        $msg .= ' Run: blackcat config runtime init';
+                        $msg .= ' (or: blackcat config runtime init --path=' . $recPath . ')';
+                    } else {
+                        $msg .= ' Run: blackcat config runtime recommend --json for candidates.';
+                    }
+                } catch (\Throwable) {
+                    $msg .= ' Run: blackcat config runtime init';
+                }
+            } else {
+                $msg .= ' Run: blackcat config runtime init';
+            }
+
+            return [[
                 'name' => 'runtime-config.file',
                 'status' => $status,
-                'message' => 'No runtime config file found (use --config=FILE or install to /etc/blackcat/config.runtime.json).',
-            ];
-            return $checks;
+                'message' => $msg,
+            ]];
         }
+
+        $checks = [];
 
         $repo = \BlackCat\Config\Runtime\Config::repo();
 
