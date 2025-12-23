@@ -31,8 +31,17 @@ final class CommandRegistry
         $errors = [];
 
         if (!class_exists(ManifestValidator::class)) {
+            // Optional dependency: attempt to autoload from a sibling workspace repo.
+            // This keeps `blackcat-cli` lightweight while allowing manifest validation in monorepo-style workspaces.
+            $autoload = rtrim($workspaceRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'blackcat-cli-spec' . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'autoload.php';
+            if (is_file($autoload)) {
+                require_once $autoload;
+            }
+        }
+
+        if (!class_exists(ManifestValidator::class)) {
             return new self([], [
-                new ManifestError('', 'Missing dependency: blackcat-cli-spec (ManifestValidator not found).'),
+                new ManifestError('', 'Missing dependency: blackcatdatabase/blackcat-cli-spec (ManifestValidator not found).'),
             ]);
         }
 
