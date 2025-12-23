@@ -13,6 +13,15 @@ use InvalidArgumentException;
 
 final class BlackCatCli
 {
+    private const ABI_SELECTOR_CREATE_INSTANCE = '81ff2930';
+    private const ABI_SELECTOR_PAUSED = '5c975abb';
+    private const ABI_SELECTOR_ACTIVE_ROOT = 'abb2efdf';
+    private const ABI_SELECTOR_ACTIVE_URI_HASH = 'ce7db111';
+    private const ABI_SELECTOR_ACTIVE_POLICY_HASH = '246ce79d';
+    private const ABI_SELECTOR_ROOT_AUTHORITY = '61fe51a1';
+    private const ABI_SELECTOR_UPGRADE_AUTHORITY = 'dd7d7cd9';
+    private const ABI_SELECTOR_EMERGENCY_AUTHORITY = '718fe851';
+
     private function __construct(
         private readonly CliConfig $config,
         private readonly CliTelemetry $telemetry,
@@ -356,6 +365,7 @@ final class BlackCatCli
             'deployer' => $this->runDeployer($args),
             'monitoring' => $this->runMonitoring($args),
             'observability' => $this->runObservability($args),
+            'trust' => $this->runTrust($args),
             'usage' => $this->runUsage($args),
             default => $this->unknownBuiltin($spec->command()),
         };
@@ -534,6 +544,1370 @@ final class BlackCatCli
 
         fwrite(STDERR, "deployer subcommand not found: {$sub}\n");
         return 1;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runTrust(array $args): int
+    {
+        $sub = $args[0] ?? 'help';
+        $rest = array_slice($args, 1);
+
+        if ($sub === 'help' || $sub === '--help' || $sub === '-h' || $sub === '') {
+            echo "trust\n";
+            echo "Usage: blackcat trust <subcommand> [args...]\n\n";
+            echo "Subcommands:\n";
+            echo "  request:init   Generate a trust-kernel setup request bundle (JSON)\n";
+            echo "  tx:factory-create  Generate InstanceFactory.createInstance calldata (JSON)\n";
+            echo "  status         Show trust-kernel runtime config status\n";
+            echo "  verify         Validate trust-kernel config + RPC quorum (exit 2 on failure)\n";
+            echo "\nExamples:\n";
+            echo "  blackcat trust request:init \\\n";
+            echo "    --root-authority=0x... \\\n";
+            echo "    --upgrade-authority=0x... \\\n";
+            echo "    --emergency-authority=0x... \\\n";
+            echo "    --rpc=https://rpc.layeredge.io --chain-id=4207 --mode=root_uri --genesis-root=0x... --genesis-uri-hash=0x...\n";
+            echo "\n";
+            echo "  blackcat trust tx:factory-create \\\n";
+            echo "    --factory=0x... \\\n";
+            echo "    --request=trust-request.json --out=trust-tx.json\n";
+            echo "\n";
+            echo "  blackcat trust status --json\n";
+            echo "  blackcat trust verify --config=/etc/blackcat/config.runtime.json\n";
+            return 0;
+        }
+
+        return match ($sub) {
+            'request:init' => $this->runTrustRequestInit($rest),
+            'tx:factory-create' => $this->runTrustTxFactoryCreate($rest),
+            'status' => $this->runTrustStatus($rest),
+            'verify' => $this->runTrustVerify($rest),
+            default => $this->unknown('trust ' . $sub),
+        };
+    }
+
+    /**
+     * Generate a JSON request bundle for creating/cloning an InstanceController on-chain.
+     *
+     * @param string[] $args
+     */
+    private function runTrustRequestInit(array $args): int
+    {
+        $out = null;
+        $chainId = 4207;
+        $rpcEndpoints = [];
+        $quorum = null;
+        $mode = 'root_uri';
+        $maxStaleSec = 180;
+
+        $rootAuthority = null;
+        $upgradeAuthority = null;
+        $emergencyAuthority = null;
+
+        $genesisRoot = null;
+        $genesisUriHash = null;
+        $genesisPolicyHash = null;
+
+        $expectValueFor = null;
+
+        foreach ($args as $arg) {
+            if ($expectValueFor !== null) {
+                $key = $expectValueFor;
+                $expectValueFor = null;
+                $this->applyTrustRequestOption(
+                    $key,
+                    (string) $arg,
+                    $out,
+                    $chainId,
+                    $rpcEndpoints,
+                    $quorum,
+                    $mode,
+                    $maxStaleSec,
+                    $rootAuthority,
+                    $upgradeAuthority,
+                    $emergencyAuthority,
+                    $genesisRoot,
+                    $genesisUriHash,
+                    $genesisPolicyHash
+                );
+                continue;
+            }
+
+            $arg = (string) $arg;
+            if ($arg === '--out' || $arg === '--chain-id' || $arg === '--rpc' || $arg === '--quorum'
+                || $arg === '--mode' || $arg === '--max-stale-sec'
+                || $arg === '--root-authority' || $arg === '--upgrade-authority' || $arg === '--emergency-authority'
+                || $arg === '--genesis-root' || $arg === '--genesis-uri-hash' || $arg === '--genesis-policy-hash'
+            ) {
+                $expectValueFor = $arg;
+                continue;
+            }
+
+            if (!str_starts_with($arg, '--')) {
+                fwrite(STDERR, "Unknown argument: {$arg}\n");
+                return 1;
+            }
+
+            [$key, $value] = explode('=', $arg, 2) + [null, null];
+            if (!is_string($key) || $key === '' || $value === null) {
+                fwrite(STDERR, "Invalid option: {$arg}\n");
+                return 1;
+            }
+
+            $this->applyTrustRequestOption(
+                $key,
+                $value,
+                $out,
+                $chainId,
+                $rpcEndpoints,
+                $quorum,
+                $mode,
+                $maxStaleSec,
+                $rootAuthority,
+                $upgradeAuthority,
+                $emergencyAuthority,
+                $genesisRoot,
+                $genesisUriHash,
+                $genesisPolicyHash
+            );
+        }
+
+        if ($expectValueFor !== null) {
+            fwrite(STDERR, "Missing value for {$expectValueFor}\n");
+            return 1;
+        }
+
+        if ($rpcEndpoints === []) {
+            $rpcEndpoints = ['https://rpc.layeredge.io'];
+        }
+        if ($quorum === null) {
+            $quorum = count($rpcEndpoints) >= 2 ? 2 : 1;
+        }
+
+        if ($rootAuthority === null || $upgradeAuthority === null || $emergencyAuthority === null) {
+            fwrite(STDERR, "Missing required authorities.\n");
+            fwrite(STDERR, "Usage: blackcat trust request:init --root-authority=0x.. --upgrade-authority=0x.. --emergency-authority=0x.. --genesis-root=0x.. --genesis-uri-hash=0x..\n");
+            return 1;
+        }
+
+        $this->assertEvmAddress($rootAuthority, 'root-authority');
+        $this->assertEvmAddress($upgradeAuthority, 'upgrade-authority');
+        $this->assertEvmAddress($emergencyAuthority, 'emergency-authority');
+
+        if ($chainId <= 0) {
+            fwrite(STDERR, "Invalid --chain-id (expected > 0)\n");
+            return 1;
+        }
+        if ($quorum < 1 || $quorum > count($rpcEndpoints)) {
+            fwrite(STDERR, "Invalid --quorum (expected 1.." . count($rpcEndpoints) . ")\n");
+            return 1;
+        }
+        if (!in_array($mode, ['root_uri', 'full'], true)) {
+            fwrite(STDERR, "Invalid --mode (expected root_uri|full)\n");
+            return 1;
+        }
+        if ($maxStaleSec < 1 || $maxStaleSec > 86400) {
+            fwrite(STDERR, "Invalid --max-stale-sec (expected 1..86400)\n");
+            return 1;
+        }
+
+        if ($genesisRoot === null) {
+            fwrite(STDERR, "Missing required --genesis-root (bytes32).\n");
+            return 1;
+        }
+        if ($genesisUriHash === null) {
+            fwrite(STDERR, "Missing required --genesis-uri-hash (bytes32).\n");
+            return 1;
+        }
+
+        $this->assertBytes32($genesisRoot, 'genesis-root');
+        $this->assertBytes32($genesisUriHash, 'genesis-uri-hash');
+
+        $policyDoc = [
+            'schema_version' => 1,
+            'type' => 'blackcat.trust.policy',
+            'mode' => $mode,
+            'max_stale_sec' => $maxStaleSec,
+        ];
+        if ($genesisPolicyHash === null) {
+            $genesisPolicyHash = $this->computeSha256Bytes32($policyDoc);
+        }
+        $this->assertBytes32($genesisPolicyHash, 'genesis-policy-hash');
+
+        $payload = [
+            'schema_version' => 1,
+            'type' => 'blackcat.trust.request',
+            'created_at' => gmdate('c'),
+            'chain' => [
+                'chain_id' => $chainId,
+                'rpc_endpoints' => array_values($rpcEndpoints),
+                'rpc_quorum' => $quorum,
+            ],
+            'trust' => [
+                'mode' => $mode,
+                'max_stale_sec' => $maxStaleSec,
+            ],
+            'authorities' => [
+                'root_authority' => $rootAuthority,
+                'upgrade_authority' => $upgradeAuthority,
+                'emergency_authority' => $emergencyAuthority,
+            ],
+            'policy' => $policyDoc,
+            'genesis' => [
+                'root' => $genesisRoot,
+                'uri_hash' => $genesisUriHash,
+                'policy_hash' => $genesisPolicyHash,
+            ],
+            'notes' => [
+                'warning' => 'Draft request bundle: review on a separate device and confirm via multisig before applying on the target server.',
+            ],
+        ];
+
+        $json = json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($json)) {
+            fwrite(STDERR, "Unable to encode JSON\n");
+            return 1;
+        }
+
+        if ($out === null) {
+            echo $json . PHP_EOL;
+            return 0;
+        }
+
+        try {
+            $this->writeSecureJsonFile($out, $json);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        echo "Wrote: {$out}\n";
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runTrustTxFactoryCreate(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+
+        $factory = null;
+        $out = null;
+        $requestPath = null;
+
+        $expectValueFor = null;
+
+        foreach ($args as $arg) {
+            if ($expectValueFor !== null) {
+                $key = $expectValueFor;
+                $expectValueFor = null;
+                $val = trim((string) $arg);
+
+                if ($key === '--factory') {
+                    $factory = $val !== '' ? $val : null;
+                } elseif ($key === '--out') {
+                    $out = $val !== '' ? $val : null;
+                } elseif ($key === '--request') {
+                    $requestPath = $val !== '' ? $val : null;
+                } else {
+                    throw new InvalidArgumentException('Unknown option: ' . $key);
+                }
+                continue;
+            }
+
+            $arg = (string) $arg;
+            if ($arg === '--factory' || $arg === '--out' || $arg === '--request') {
+                $expectValueFor = $arg;
+                continue;
+            }
+
+            if (!str_starts_with($arg, '--')) {
+                fwrite(STDERR, "Unknown argument: {$arg}\n");
+                return 1;
+            }
+
+            [$key, $value] = explode('=', $arg, 2) + [null, null];
+            if (!is_string($key) || $key === '' || $value === null) {
+                fwrite(STDERR, "Invalid option: {$arg}\n");
+                return 1;
+            }
+
+            $value = trim($value);
+            match ($key) {
+                '--factory' => $factory = $value !== '' ? $value : null,
+                '--out' => $out = $value !== '' ? $value : null,
+                '--request' => $requestPath = $value !== '' ? $value : null,
+                default => throw new InvalidArgumentException('Unknown option: ' . $key),
+            };
+        }
+
+        if ($expectValueFor !== null) {
+            fwrite(STDERR, "Missing value for {$expectValueFor}\n");
+            return 1;
+        }
+
+        if ($factory === null) {
+            fwrite(STDERR, "Usage: blackcat trust tx:factory-create --factory=0x... --request=FILE [--out=FILE] [--json]\n");
+            return 1;
+        }
+        $this->assertEvmAddress($factory, 'factory');
+
+        try {
+            $raw = $this->readRequestJson($requestPath);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 1;
+        }
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            fwrite(STDERR, "Invalid request JSON: {$e->getMessage()}\n");
+            return 1;
+        }
+        if (!is_array($decoded)) {
+            fwrite(STDERR, "Invalid request JSON (expected object)\n");
+            return 1;
+        }
+
+        /** @var array<string,mixed> $decoded */
+        $authorities = $decoded['authorities'] ?? null;
+        $genesis = $decoded['genesis'] ?? null;
+        $chain = $decoded['chain'] ?? null;
+        $trust = $decoded['trust'] ?? null;
+        $policy = $decoded['policy'] ?? null;
+
+        if (!is_array($authorities) || !is_array($genesis)) {
+            fwrite(STDERR, "Invalid request payload (missing authorities/genesis)\n");
+            return 1;
+        }
+
+        $rootAuthority = $authorities['root_authority'] ?? null;
+        $upgradeAuthority = $authorities['upgrade_authority'] ?? null;
+        $emergencyAuthority = $authorities['emergency_authority'] ?? null;
+
+        if (!is_string($rootAuthority) || !is_string($upgradeAuthority) || !is_string($emergencyAuthority)) {
+            fwrite(STDERR, "Invalid request payload (authorities must be strings)\n");
+            return 1;
+        }
+        $this->assertEvmAddress($rootAuthority, 'root-authority');
+        $this->assertEvmAddress($upgradeAuthority, 'upgrade-authority');
+        $this->assertEvmAddress($emergencyAuthority, 'emergency-authority');
+
+        $genesisRoot = $genesis['root'] ?? null;
+        $genesisUriHash = $genesis['uri_hash'] ?? null;
+        $genesisPolicyHash = $genesis['policy_hash'] ?? null;
+
+        if (!is_string($genesisRoot) || $genesisRoot === '') {
+            fwrite(STDERR, "Request is missing genesis.root (required for createInstance)\n");
+            return 1;
+        }
+        $this->assertBytes32($genesisRoot, 'genesis-root');
+
+        if (!is_string($genesisUriHash) || $genesisUriHash === '') {
+            fwrite(STDERR, "Request is missing genesis.uri_hash (required for createInstance)\n");
+            return 1;
+        }
+        $this->assertBytes32($genesisUriHash, 'genesis-uri-hash');
+
+        if (!is_string($genesisPolicyHash) || $genesisPolicyHash === '') {
+            $mode = 'root_uri';
+            $maxStaleSec = 180;
+
+            if (is_array($trust)) {
+                $modeRaw = $trust['mode'] ?? null;
+                if (is_string($modeRaw) && $modeRaw !== '') {
+                    $mode = strtolower(trim($modeRaw));
+                }
+
+                $maxRaw = $trust['max_stale_sec'] ?? null;
+                if (is_int($maxRaw)) {
+                    $maxStaleSec = $maxRaw;
+                } elseif (is_string($maxRaw) && trim($maxRaw) !== '' && ctype_digit(trim($maxRaw))) {
+                    $maxStaleSec = (int) trim($maxRaw);
+                }
+            }
+
+            $policyDoc = is_array($policy) ? $policy : [
+                'schema_version' => 1,
+                'type' => 'blackcat.trust.policy',
+                'mode' => $mode,
+                'max_stale_sec' => $maxStaleSec,
+            ];
+            $genesisPolicyHash = $this->computeSha256Bytes32($policyDoc);
+        }
+        $this->assertBytes32($genesisPolicyHash, 'genesis-policy-hash');
+
+        $chainId = 4207;
+        if (is_array($chain)) {
+            $cid = $chain['chain_id'] ?? null;
+            if (is_int($cid)) {
+                $chainId = $cid;
+            } elseif (is_string($cid) && trim($cid) !== '' && ctype_digit(trim($cid))) {
+                $chainId = (int) trim($cid);
+            }
+        }
+
+        $data = $this->buildCreateInstanceCalldata(
+            $rootAuthority,
+            $upgradeAuthority,
+            $emergencyAuthority,
+            $genesisRoot,
+            $genesisUriHash,
+            $genesisPolicyHash
+        );
+
+        $dataSha256 = $this->sha256HexData($data);
+
+        $tx = [
+            'chain_id' => $chainId,
+            'to' => strtolower($factory),
+            'value' => '0x0',
+            'data' => $data,
+            'data_sha256' => $dataSha256,
+            'method' => 'createInstance(address,address,address,bytes32,bytes32,bytes32)',
+            'args' => [
+                'root_authority' => strtolower($rootAuthority),
+                'upgrade_authority' => strtolower($upgradeAuthority),
+                'emergency_authority' => strtolower($emergencyAuthority),
+                'genesis_root' => strtolower($genesisRoot),
+                'genesis_uri_hash' => strtolower($genesisUriHash),
+                'genesis_policy_hash' => strtolower($genesisPolicyHash),
+            ],
+            'safe' => [
+                'operation' => 'CALL',
+                'note' => 'For Safe: set (to,value,data,operation) to these values and confirm with the required threshold.',
+            ],
+        ];
+
+        $outJson = json_encode($tx, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($outJson)) {
+            fwrite(STDERR, "Unable to encode JSON\n");
+            return 1;
+        }
+
+        if ($out !== null) {
+            try {
+                $this->writeSecureJsonFile($out, $outJson);
+            } catch (\Throwable $e) {
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+                return 2;
+            }
+        }
+
+        if ($json || $out === null) {
+            echo $outJson . PHP_EOL;
+        } else {
+            echo "Wrote: {$out}\n";
+        }
+
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runTrustStatus(array $args): int
+    {
+        [$json, $remaining] = $this->consumeFlag($args, '--json');
+        [$runtimeConfigPath, $remaining] = self::consumeRuntimeConfigPath($remaining);
+        if ($remaining !== []) {
+            fwrite(STDERR, "trust status does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            if (is_string($runtimeConfigPath) && $runtimeConfigPath !== '') {
+                \BlackCat\Config\Runtime\Config::initFromJsonFileIfNeeded($runtimeConfigPath);
+            } else {
+                $repo = \BlackCat\Config\Runtime\ConfigBootstrap::tryLoadFirstAvailableJsonFile();
+                if ($repo !== null) {
+                    \BlackCat\Config\Runtime\Config::initIfNeeded($repo);
+                }
+            }
+        } catch (\Throwable $e) {
+            $payload = [
+                'status' => 'fail',
+                'message' => $e->getMessage(),
+            ];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 2;
+        }
+
+        if (!\BlackCat\Config\Runtime\Config::isInitialized()) {
+            $payload = [
+                'status' => 'missing',
+                'message' => 'No usable runtime config file found. Run: blackcat config runtime init',
+            ];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 0;
+        }
+
+        $repo = \BlackCat\Config\Runtime\Config::repo();
+
+        $configured = $repo->get('trust.web3') !== null;
+        $valid = false;
+        $error = null;
+
+        if ($configured) {
+            try {
+                \BlackCat\Config\Runtime\RuntimeConfigValidator::assertTrustKernelWeb3Config($repo);
+                $valid = true;
+            } catch (\Throwable $e) {
+                $error = $e->getMessage();
+            }
+        }
+
+        $web3 = $repo->get('trust.web3');
+        $chainId = is_array($web3) ? ($web3['chain_id'] ?? null) : null;
+        $mode = is_array($web3) ? ($web3['mode'] ?? null) : null;
+
+        $payload = [
+            'status' => $configured ? ($valid ? 'ok' : 'fail') : 'missing',
+            'configured' => $configured,
+            'chain_id' => $chainId,
+            'mode' => $mode,
+            'message' => $error,
+        ];
+
+        if ($json) {
+            echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+        } else {
+            echo "Trust kernel\n";
+            echo "  status: " . $payload['status'] . "\n";
+            if ($payload['chain_id'] !== null) {
+                echo "  chain_id: " . (string) $payload['chain_id'] . "\n";
+            }
+            if (is_string($payload['mode']) && $payload['mode'] !== '') {
+                echo "  mode: " . $payload['mode'] . "\n";
+            }
+            if (is_string($payload['message']) && $payload['message'] !== '') {
+                echo "  error: " . $payload['message'] . "\n";
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runTrustVerify(array $args): int
+    {
+        [$json, $remaining] = $this->consumeFlag($args, '--json');
+        [$runtimeConfigPath, $remaining] = self::consumeRuntimeConfigPath($remaining);
+        if ($remaining !== []) {
+            fwrite(STDERR, "trust verify does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $this->initRuntimeConfig($runtimeConfigPath);
+        } catch (\Throwable $e) {
+            $payload = ['status' => 'fail', 'message' => $e->getMessage()];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 2;
+        }
+
+        if (!\BlackCat\Config\Runtime\Config::isInitialized()) {
+            $payload = [
+                'status' => 'missing',
+                'message' => 'No usable runtime config file found. Run: blackcat config runtime init',
+            ];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 2;
+        }
+
+        $repo = \BlackCat\Config\Runtime\Config::repo();
+
+        try {
+            \BlackCat\Config\Runtime\RuntimeConfigValidator::assertTrustKernelWeb3Config($repo);
+        } catch (\Throwable $e) {
+            $payload = ['status' => 'fail', 'message' => $e->getMessage()];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 2;
+        }
+
+        $web3 = $repo->get('trust.web3');
+        if (!is_array($web3)) {
+            $payload = ['status' => 'fail', 'message' => 'trust.web3 is not configured.'];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 2;
+        }
+
+        $expectedChainId = $repo->requireInt('trust.web3.chain_id');
+        $endpoints = $repo->get('trust.web3.rpc_endpoints');
+        if (!is_array($endpoints)) {
+            $payload = ['status' => 'fail', 'message' => 'trust.web3.rpc_endpoints is not a list.'];
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                fwrite(STDERR, $payload['message'] . PHP_EOL);
+            }
+            return 2;
+        }
+
+        /** @var list<string> $rpcEndpoints */
+        $rpcEndpoints = [];
+        foreach ($endpoints as $ep) {
+            if (!is_string($ep)) {
+                continue;
+            }
+            $ep = trim($ep);
+            if ($ep === '') {
+                continue;
+            }
+            $rpcEndpoints[] = $ep;
+        }
+        $rpcEndpoints = array_values(array_unique($rpcEndpoints));
+
+        $quorumRaw = $repo->get('trust.web3.rpc_quorum', 1);
+        $rpcQuorum = is_int($quorumRaw) ? $quorumRaw : (int) $quorumRaw;
+        $rpcQuorum = max(1, $rpcQuorum);
+
+        $controller = $repo->requireString('trust.web3.contracts.instance_controller');
+        $this->assertEvmAddress($controller, 'instance-controller');
+
+        $timeout = 2.5;
+
+        $chainCheck = $this->rpcQuorumChainId($rpcEndpoints, $expectedChainId, $rpcQuorum, $timeout);
+        $goodEndpoints = $chainCheck['matching_endpoints'];
+
+        $status = $chainCheck['ok'] ? 'ok' : 'fail';
+        $failures = [];
+
+        if (!$chainCheck['ok']) {
+            $failures[] = 'rpc.chain_id_quorum_failed';
+        }
+
+        $codeCheck = null;
+        if ($chainCheck['ok']) {
+            $codeCheck = $this->rpcQuorumGetCode($goodEndpoints, $rpcQuorum, $controller, $timeout);
+            if (!$codeCheck['ok']) {
+                $status = 'fail';
+                $failures[] = 'rpc.contract_code_quorum_failed';
+            }
+        }
+
+        $paused = null;
+        $activeRoot = null;
+        $activeUriHash = null;
+        $activePolicyHash = null;
+        $authorities = null;
+
+        if ($chainCheck['ok'] && $codeCheck !== null && $codeCheck['ok']) {
+            $pausedCall = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_PAUSED, $timeout);
+            if (!$pausedCall['ok']) {
+                $status = 'fail';
+                $failures[] = 'rpc.paused_call_quorum_failed';
+            } else {
+                $paused = $this->decodeBoolWord($pausedCall['result']);
+                if ($paused) {
+                    $status = 'fail';
+                    $failures[] = 'controller.paused';
+                }
+            }
+
+            $rootCall = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_ACTIVE_ROOT, $timeout);
+            if (!$rootCall['ok']) {
+                $status = 'fail';
+                $failures[] = 'rpc.active_root_call_quorum_failed';
+            } else {
+                $activeRoot = $this->normalizeWordHex($rootCall['result']);
+                if (strtolower($activeRoot) === '0x' . str_repeat('0', 64)) {
+                    $status = 'fail';
+                    $failures[] = 'controller.active_root_zero';
+                }
+            }
+
+            $uriCall = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_ACTIVE_URI_HASH, $timeout);
+            if ($uriCall['ok']) {
+                $activeUriHash = $this->normalizeWordHex($uriCall['result']);
+            }
+
+            $policyCall = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_ACTIVE_POLICY_HASH, $timeout);
+            if ($policyCall['ok']) {
+                $activePolicyHash = $this->normalizeWordHex($policyCall['result']);
+            }
+
+            $rootAuth = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_ROOT_AUTHORITY, $timeout);
+            $upAuth = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_UPGRADE_AUTHORITY, $timeout);
+            $emAuth = $this->rpcQuorumEthCall($goodEndpoints, $rpcQuorum, $controller, '0x' . self::ABI_SELECTOR_EMERGENCY_AUTHORITY, $timeout);
+
+            if (!$rootAuth['ok'] || !$upAuth['ok'] || !$emAuth['ok']) {
+                $status = 'fail';
+                $failures[] = 'rpc.authorities_call_quorum_failed';
+            } else {
+                $authorities = [
+                    'root_authority' => $this->decodeAddressWord($rootAuth['result']),
+                    'upgrade_authority' => $this->decodeAddressWord($upAuth['result']),
+                    'emergency_authority' => $this->decodeAddressWord($emAuth['result']),
+                ];
+            }
+        }
+
+        $payload = [
+            'status' => $status,
+            'failures' => $failures,
+            'chain' => $chainCheck,
+            'contract' => [
+                'instance_controller' => strtolower($controller),
+                'code' => $codeCheck,
+                'paused' => $paused,
+                'active_root' => $activeRoot,
+                'active_uri_hash' => $activeUriHash,
+                'active_policy_hash' => $activePolicyHash,
+                'authorities' => $authorities,
+            ],
+        ];
+
+        if ($json) {
+            echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        } else {
+            echo "Trust verify\n";
+            echo "  status: {$status}\n";
+            if ($failures !== []) {
+                echo "  failures:\n";
+                foreach ($failures as $f) {
+                    echo "    - {$f}\n";
+                }
+            }
+        }
+
+        return $status === 'ok' ? 0 : 2;
+    }
+
+    private function initRuntimeConfig(?string $runtimeConfigPath): void
+    {
+        if (is_string($runtimeConfigPath) && $runtimeConfigPath !== '') {
+            \BlackCat\Config\Runtime\Config::initFromJsonFileIfNeeded($runtimeConfigPath);
+            return;
+        }
+
+        $repo = \BlackCat\Config\Runtime\ConfigBootstrap::tryLoadFirstAvailableJsonFile();
+        if ($repo !== null) {
+            \BlackCat\Config\Runtime\Config::initIfNeeded($repo);
+        }
+    }
+
+    /**
+     * @param list<string> $endpoints
+     * @return array{
+     *   ok:bool,
+     *   expected_chain_id:int,
+     *   quorum:int,
+     *   matching_endpoints:list<string>,
+     *   results:list<array{endpoint:string,status:string,chain_id:?int,error:?string}>
+     * }
+     */
+    private function rpcQuorumChainId(array $endpoints, int $expectedChainId, int $quorum, float $timeoutSeconds): array
+    {
+        $rows = [];
+        $matching = [];
+
+        foreach ($endpoints as $endpoint) {
+            $endpoint = trim($endpoint);
+            if ($endpoint === '') {
+                continue;
+            }
+
+            if (!$this->isSupportedHttpEndpoint($endpoint)) {
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'skip', 'chain_id' => null, 'error' => 'Unsupported RPC endpoint scheme (https/http only).'];
+                continue;
+            }
+
+            try {
+                $result = $this->rpcCall($endpoint, 'eth_chainId', [], $timeoutSeconds);
+                if (!is_string($result)) {
+                    throw new \RuntimeException('Invalid JSON-RPC result type (expected string).');
+                }
+                $chainId = $this->hexToInt($result, 'eth_chainId');
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'ok', 'chain_id' => $chainId, 'error' => null];
+                if ($chainId === $expectedChainId) {
+                    $matching[] = $endpoint;
+                }
+            } catch (\Throwable $e) {
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'fail', 'chain_id' => null, 'error' => $e->getMessage()];
+            }
+        }
+
+        return [
+            'ok' => count($matching) >= $quorum,
+            'expected_chain_id' => $expectedChainId,
+            'quorum' => $quorum,
+            'matching_endpoints' => array_values($matching),
+            'results' => $rows,
+        ];
+    }
+
+    /**
+     * @param list<string> $endpoints
+     * @return array{
+     *   ok:bool,
+     *   quorum:int,
+     *   selected:?string,
+     *   code_sha256:?string,
+     *   code_bytes:?int,
+     *   results:list<array{endpoint:string,status:string,code_sha256:?string,code_bytes:?int,error:?string}>
+     * }
+     */
+    private function rpcQuorumGetCode(array $endpoints, int $quorum, string $address, float $timeoutSeconds): array
+    {
+        $rows = [];
+        $counts = [];
+        $endpointByHash = [];
+
+        foreach ($endpoints as $endpoint) {
+            if (!$this->isSupportedHttpEndpoint($endpoint)) {
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'skip', 'code_sha256' => null, 'code_bytes' => null, 'error' => 'Unsupported RPC endpoint scheme.'];
+                continue;
+            }
+
+            try {
+                $result = $this->rpcCall($endpoint, 'eth_getCode', [$address, 'latest'], $timeoutSeconds);
+                if (!is_string($result)) {
+                    throw new \RuntimeException('Invalid eth_getCode result type (expected string).');
+                }
+                $hex = $this->normalizeHex($result);
+                $raw = substr($hex, 2);
+                if ($raw === '' || $raw === '0') {
+                    $raw = '';
+                }
+                $bytes = $raw !== '' ? (int) (strlen($raw) / 2) : 0;
+                if ($bytes <= 0) {
+                    throw new \RuntimeException('eth_getCode returned empty code (address has no contract).');
+                }
+
+                $sha = hash('sha256', hex2bin($raw) ?: '');
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'ok', 'code_sha256' => $sha, 'code_bytes' => $bytes, 'error' => null];
+                $counts[$sha] = ($counts[$sha] ?? 0) + 1;
+                $endpointByHash[$sha] ??= $endpoint;
+            } catch (\Throwable $e) {
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'fail', 'code_sha256' => null, 'code_bytes' => null, 'error' => $e->getMessage()];
+            }
+        }
+
+        $selectedSha = null;
+        foreach ($counts as $sha => $count) {
+            if ($count >= $quorum) {
+                $selectedSha = (string) $sha;
+                break;
+            }
+        }
+
+        $selectedEndpoint = $selectedSha !== null ? ($endpointByHash[$selectedSha] ?? null) : null;
+        $selectedBytes = null;
+        if ($selectedSha !== null) {
+            foreach ($rows as $row) {
+                if ($row['code_sha256'] === $selectedSha) {
+                    $selectedBytes = $row['code_bytes'];
+                    break;
+                }
+            }
+        }
+
+        return [
+            'ok' => $selectedSha !== null,
+            'quorum' => $quorum,
+            'selected' => $selectedEndpoint,
+            'code_sha256' => $selectedSha,
+            'code_bytes' => $selectedBytes,
+            'results' => $rows,
+        ];
+    }
+
+    /**
+     * @param list<string> $endpoints
+     * @return array{
+     *   ok:bool,
+     *   quorum:int,
+     *   result:string,
+     *   results:list<array{endpoint:string,status:string,result:?string,error:?string}>
+     * }
+     */
+    private function rpcQuorumEthCall(array $endpoints, int $quorum, string $to, string $data, float $timeoutSeconds): array
+    {
+        $rows = [];
+        $counts = [];
+
+        foreach ($endpoints as $endpoint) {
+            if (!$this->isSupportedHttpEndpoint($endpoint)) {
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'skip', 'result' => null, 'error' => 'Unsupported RPC endpoint scheme.'];
+                continue;
+            }
+
+            try {
+                $result = $this->rpcCall($endpoint, 'eth_call', [['to' => $to, 'data' => $data], 'latest'], $timeoutSeconds);
+                if (!is_string($result)) {
+                    throw new \RuntimeException('Invalid eth_call result type (expected string).');
+                }
+                $hex = $this->normalizeWordHex($result);
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'ok', 'result' => $hex, 'error' => null];
+                $counts[$hex] = ($counts[$hex] ?? 0) + 1;
+            } catch (\Throwable $e) {
+                $rows[] = ['endpoint' => $endpoint, 'status' => 'fail', 'result' => null, 'error' => $e->getMessage()];
+            }
+        }
+
+        $selected = null;
+        foreach ($counts as $value => $count) {
+            if ($count >= $quorum) {
+                $selected = (string) $value;
+                break;
+            }
+        }
+
+        return [
+            'ok' => $selected !== null,
+            'quorum' => $quorum,
+            'result' => $selected ?? ('0x' . str_repeat('0', 64)),
+            'results' => $rows,
+        ];
+    }
+
+    /**
+     * @param array<int,mixed> $params
+     */
+    private function rpcCall(string $endpoint, string $method, array $params, float $timeoutSeconds): mixed
+    {
+        $payload = [
+            'jsonrpc' => '2.0',
+            'id' => bin2hex(random_bytes(8)),
+            'method' => $method,
+            'params' => $params,
+        ];
+
+        $res = $this->httpPostJson($endpoint, $payload, $timeoutSeconds);
+        if ($res['status'] !== 200) {
+            throw new \RuntimeException("JSON-RPC HTTP {$res['status']} from {$endpoint}");
+        }
+
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($res['body'], true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new \RuntimeException('Invalid JSON-RPC response from: ' . $endpoint, 0, $e);
+        }
+
+        if (!is_array($decoded)) {
+            throw new \RuntimeException('Invalid JSON-RPC response type from: ' . $endpoint);
+        }
+
+        if (isset($decoded['error'])) {
+            $err = $decoded['error'];
+            if (is_array($err) && isset($err['message']) && is_string($err['message'])) {
+                throw new \RuntimeException('JSON-RPC error: ' . $err['message']);
+            }
+            throw new \RuntimeException('JSON-RPC error response received.');
+        }
+
+        return $decoded['result'] ?? null;
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @return array{status:int,body:string}
+     */
+    private function httpPostJson(string $url, array $payload, float $timeoutSeconds): array
+    {
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+        if (!is_string($json)) {
+            throw new \RuntimeException('Unable to encode JSON-RPC payload.');
+        }
+
+        $ctx = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'timeout' => $timeoutSeconds,
+                'ignore_errors' => true,
+                'header' => "User-Agent: blackcat-cli\r\nContent-Type: application/json\r\n",
+                'content' => $json,
+            ],
+        ]);
+
+        /** @var list<string> $http_response_header */
+        $http_response_header = [];
+        $body = @file_get_contents($url, false, $ctx);
+        $headers = $http_response_header;
+        $status = 0;
+        if ($headers !== []) {
+            $first = (string) ($headers[0] ?? '');
+            if (preg_match('/\\s(\\d{3})\\s/', $first, $m)) {
+                $status = (int) $m[1];
+            }
+        }
+
+        if ($body === false) {
+            throw new \RuntimeException('HTTP request failed: ' . $url);
+        }
+
+        return [
+            'status' => $status,
+            'body' => $body,
+        ];
+    }
+
+    private function isSupportedHttpEndpoint(string $endpoint): bool
+    {
+        $parts = @parse_url($endpoint);
+        if (!is_array($parts)) {
+            return false;
+        }
+        $scheme = $parts['scheme'] ?? null;
+        if (!is_string($scheme)) {
+            return false;
+        }
+        $scheme = strtolower($scheme);
+
+        if ($scheme === 'https') {
+            return true;
+        }
+
+        if ($scheme !== 'http') {
+            return false;
+        }
+
+        $host = $parts['host'] ?? null;
+        if (!is_string($host)) {
+            return false;
+        }
+        $host = strtolower($host);
+        return $host === 'localhost' || $host === '127.0.0.1' || $host === '::1';
+    }
+
+    private function hexToInt(string $hex, string $context): int
+    {
+        $hex = strtolower(trim($hex));
+        if (!str_starts_with($hex, '0x')) {
+            throw new \RuntimeException("Invalid hex result for {$context} (missing 0x prefix).");
+        }
+        $raw = substr($hex, 2);
+        if ($raw === '' || preg_match('/^[0-9a-f]+$/', $raw) !== 1) {
+            throw new \RuntimeException("Invalid hex result for {$context}.");
+        }
+        return (int) hexdec($raw);
+    }
+
+    private function normalizeHex(string $hex): string
+    {
+        $hex = strtolower(trim($hex));
+        if (!str_starts_with($hex, '0x')) {
+            throw new \RuntimeException('Invalid hex string (missing 0x prefix).');
+        }
+        $raw = substr($hex, 2);
+        if ($raw === '') {
+            return '0x';
+        }
+        if (preg_match('/^[0-9a-f]+$/', $raw) !== 1) {
+            throw new \RuntimeException('Invalid hex string.');
+        }
+        if ((strlen($raw) % 2) === 1) {
+            $raw = '0' . $raw;
+        }
+        return '0x' . $raw;
+    }
+
+    private function normalizeWordHex(string $hex): string
+    {
+        $hex = $this->normalizeHex($hex);
+        $raw = substr($hex, 2);
+        if ($raw === '') {
+            $raw = '0';
+        }
+        if (strlen($raw) > 64) {
+            throw new \RuntimeException('Unexpected ABI word length.');
+        }
+        $raw = str_pad($raw, 64, '0', STR_PAD_LEFT);
+        return '0x' . $raw;
+    }
+
+    private function decodeBoolWord(string $hexWord): bool
+    {
+        $hex = $this->normalizeWordHex($hexWord);
+        $raw = ltrim(substr($hex, 2), '0');
+        if ($raw === '') {
+            return false;
+        }
+        return $raw === '1';
+    }
+
+    private function decodeAddressWord(string $hexWord): string
+    {
+        $hex = $this->normalizeWordHex($hexWord);
+        $raw = substr($hex, 2);
+        $addr = substr($raw, -40);
+        $out = '0x' . $addr;
+        $this->assertEvmAddress($out, 'address');
+        return strtolower($out);
+    }
+
+    private function buildCreateInstanceCalldata(
+        string $rootAuthority,
+        string $upgradeAuthority,
+        string $emergencyAuthority,
+        string $genesisRoot,
+        string $genesisUriHash,
+        string $genesisPolicyHash
+    ): string {
+        $this->assertEvmAddress($rootAuthority, 'root-authority');
+        $this->assertEvmAddress($upgradeAuthority, 'upgrade-authority');
+        $this->assertEvmAddress($emergencyAuthority, 'emergency-authority');
+        $this->assertBytes32($genesisRoot, 'genesis-root');
+        $this->assertBytes32($genesisUriHash, 'genesis-uri-hash');
+        $this->assertBytes32($genesisPolicyHash, 'genesis-policy-hash');
+
+        $data = self::ABI_SELECTOR_CREATE_INSTANCE
+            . $this->abiEncodeAddressWord($rootAuthority)
+            . $this->abiEncodeAddressWord($upgradeAuthority)
+            . $this->abiEncodeAddressWord($emergencyAuthority)
+            . $this->abiEncodeBytes32Word($genesisRoot)
+            . $this->abiEncodeBytes32Word($genesisUriHash)
+            . $this->abiEncodeBytes32Word($genesisPolicyHash);
+
+        return '0x' . strtolower($data);
+    }
+
+    private function abiEncodeAddressWord(string $address): string
+    {
+        $this->assertEvmAddress($address, 'address');
+        $raw = strtolower(substr($address, 2));
+        return str_pad($raw, 64, '0', STR_PAD_LEFT);
+    }
+
+    private function abiEncodeBytes32Word(string $hex): string
+    {
+        $this->assertBytes32($hex, 'bytes32');
+        return strtolower(substr($hex, 2));
+    }
+
+    private function sha256HexData(string $hexData): string
+    {
+        $hexData = $this->normalizeHex($hexData);
+        $raw = substr($hexData, 2);
+        $bin = $raw !== '' ? hex2bin($raw) : '';
+        if ($bin === false) {
+            throw new \RuntimeException('Invalid hex data (hex2bin failed).');
+        }
+        return hash('sha256', $bin);
+    }
+
+    private function readRequestJson(?string $path): string
+    {
+        $path = $path !== null ? trim($path) : null;
+
+        if ($path === null || $path === '' || $path === '-') {
+            $data = stream_get_contents(STDIN);
+            if (!is_string($data) || trim($data) === '') {
+                throw new \RuntimeException('Request input is empty (use --request=FILE or pipe JSON via stdin).');
+            }
+            return $data;
+        }
+
+        if (!is_file($path)) {
+            throw new \RuntimeException('Request file not found: ' . $path);
+        }
+
+        $raw = file_get_contents($path);
+        if ($raw === false) {
+            throw new \RuntimeException('Unable to read request file: ' . $path);
+        }
+
+        return $raw;
+    }
+
+    /**
+     * @param list<string> $rpcEndpoints
+     */
+    private function applyTrustRequestOption(
+        string $key,
+        string $value,
+        ?string &$out,
+        int &$chainId,
+        array &$rpcEndpoints,
+        ?int &$quorum,
+        string &$mode,
+        int &$maxStaleSec,
+        ?string &$rootAuthority,
+        ?string &$upgradeAuthority,
+        ?string &$emergencyAuthority,
+        ?string &$genesisRoot,
+        ?string &$genesisUriHash,
+        ?string &$genesisPolicyHash
+    ): void {
+        $value = trim($value);
+
+        switch ($key) {
+            case '--out':
+                $out = $value !== '' ? $value : null;
+                return;
+
+            case '--chain-id':
+                $chainId = (int) $value;
+                return;
+
+            case '--rpc':
+                if ($value !== '') {
+                    $rpcEndpoints[] = $value;
+                }
+                return;
+
+            case '--quorum':
+                $quorum = (int) $value;
+                return;
+
+            case '--mode':
+                $mode = strtolower($value);
+                return;
+
+            case '--max-stale-sec':
+                $maxStaleSec = (int) $value;
+                return;
+
+            case '--root-authority':
+                $rootAuthority = $value !== '' ? $value : null;
+                return;
+
+            case '--upgrade-authority':
+                $upgradeAuthority = $value !== '' ? $value : null;
+                return;
+
+            case '--emergency-authority':
+                $emergencyAuthority = $value !== '' ? $value : null;
+                return;
+
+            case '--genesis-root':
+                $genesisRoot = $value !== '' ? $value : null;
+                return;
+
+            case '--genesis-uri-hash':
+                $genesisUriHash = $value !== '' ? $value : null;
+                return;
+
+            case '--genesis-policy-hash':
+                $genesisPolicyHash = $value !== '' ? $value : null;
+                return;
+
+            default:
+                throw new InvalidArgumentException('Unknown option: ' . $key);
+        }
+    }
+
+    private function assertEvmAddress(string $address, string $label): void
+    {
+        $address = trim($address);
+        if (!preg_match('/^0x[a-fA-F0-9]{40}$/', $address)) {
+            throw new InvalidArgumentException("Invalid {$label} address.");
+        }
+        if (strtolower($address) === '0x0000000000000000000000000000000000000000') {
+            throw new InvalidArgumentException("Invalid {$label} address (zero address).");
+        }
+    }
+
+    private function assertBytes32(string $value, string $label): void
+    {
+        $value = trim($value);
+        if (!preg_match('/^0x[a-fA-F0-9]{64}$/', $value)) {
+            throw new InvalidArgumentException("Invalid {$label} (expected 0x + 32 bytes hex).");
+        }
+        if (strtolower($value) === '0x' . str_repeat('0', 64)) {
+            throw new InvalidArgumentException("Invalid {$label} (zero hash).");
+        }
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     */
+    private function computeSha256Bytes32(array $data): string
+    {
+        $json = json_encode($data, JSON_UNESCAPED_SLASHES);
+        if (!is_string($json)) {
+            throw new \RuntimeException('Unable to encode JSON for hashing.');
+        }
+
+        return '0x' . hash('sha256', $json);
+    }
+
+    private function writeSecureJsonFile(string $path, string $json): void
+    {
+        $path = trim($path);
+        if ($path === '' || str_contains($path, "\0")) {
+            throw new InvalidArgumentException('Invalid --out path.');
+        }
+
+        $dir = dirname($path);
+        if ($dir === '' || $dir === '.' || $dir === DIRECTORY_SEPARATOR) {
+            throw new InvalidArgumentException('Invalid --out path (must not be root).');
+        }
+
+        if (!is_dir($dir)) {
+            if (!@mkdir($dir, 0750, true) && !is_dir($dir)) {
+                throw new \RuntimeException('Unable to create directory: ' . $dir);
+            }
+            if (DIRECTORY_SEPARATOR !== '\\') {
+                @chmod($dir, 0750);
+            }
+        }
+
+        $tmp = $dir . DIRECTORY_SEPARATOR . '.blackcat-trust.' . bin2hex(random_bytes(8)) . '.tmp';
+        $fp = @fopen($tmp, 'xb');
+        if ($fp === false) {
+            throw new \RuntimeException('Unable to create temp file in: ' . $dir);
+        }
+
+        try {
+            $bytes = fwrite($fp, $json . "\n");
+            if ($bytes === false) {
+                throw new \RuntimeException('Unable to write request file.');
+            }
+        } finally {
+            fclose($fp);
+        }
+
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            @chmod($tmp, 0600);
+        }
+
+        if (!@rename($tmp, $path)) {
+            @unlink($tmp);
+            throw new \RuntimeException('Unable to move request file into place: ' . $path);
+        }
+
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            @chmod($path, 0600);
+        }
     }
 
     /**

@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "test": "vendor/bin/phpunit --colors=always",
-    "stan": "vendor/bin/phpstan analyse --configuration=phpstan.neon"
+    "stan": "php -d memory_limit=512M vendor/bin/phpstan analyse --configuration=phpstan.neon"
   },
   "config": {
     "optimize-autoloader": true,
@@ -36,4 +36,3 @@
   "minimum-stability": "stable",
   "prefer-stable": true
 }
-

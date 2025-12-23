@@ -13,6 +13,14 @@
 
 ## Stage 3 – Backend modules
 - Add native commands for orchestrator/sync pipelines and observability flows.
+- Add native commands for the trust kernel (Web3):
+  - `blackcat trust status|verify` (quorum + chain id + contract checks + local integrity summary).
+  - `blackcat trust rpc:diag` (multi-RPC quorum health, latency, consistency).
+  - `blackcat trust install:*` helpers (generate “contract clone request” bundles for offline review).
+  - `blackcat trust upgrade:*` (plan → propose → activate) and `blackcat trust emergency:*` (pause/unpause) for operators.
+- Expand `blackcat doctor` checks (opt-in modules):
+  - Grafana/Loki readiness, promtail scraping sanity, exporters `/metrics` checks.
+  - Trust-kernel health: last attestation age vs `max_stale_sec`, tx-outbox backlog, paused state.
 - Define stable CLI contracts and generate help/docs from manifests.
 - CI hook: `blackcat verify --json` consumed by installers/agents.
 
