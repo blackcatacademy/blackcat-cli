@@ -567,7 +567,8 @@ final class BlackCatCli
             echo "    --root-authority=0x... \\\n";
             echo "    --upgrade-authority=0x... \\\n";
             echo "    --emergency-authority=0x... \\\n";
-            echo "    --rpc=https://rpc.layeredge.io --chain-id=4207 --mode=root_uri --genesis-root=0x... --genesis-uri-hash=0x...\n";
+            echo "    --rpc=https://rpc.layeredge.io --chain-id=4207 --mode=full --policy-version=3 --enforcement=strict \\\n";
+            echo "    --genesis-root=0x... --genesis-uri-hash=0x...\n";
             echo "\n";
             echo "  blackcat trust tx:factory-create \\\n";
             echo "    --factory=0x... \\\n";
@@ -598,8 +599,10 @@ final class BlackCatCli
         $chainId = 4207;
         $rpcEndpoints = [];
         $quorum = null;
-        $mode = 'root_uri';
+        $mode = 'full';
         $maxStaleSec = 180;
+        $policyVersion = 3;
+        $enforcement = 'strict';
 
         $rootAuthority = null;
         $upgradeAuthority = null;
@@ -624,6 +627,8 @@ final class BlackCatCli
                     $quorum,
                     $mode,
                     $maxStaleSec,
+                    $policyVersion,
+                    $enforcement,
                     $rootAuthority,
                     $upgradeAuthority,
                     $emergencyAuthority,
@@ -636,7 +641,7 @@ final class BlackCatCli
 
             $arg = (string) $arg;
             if ($arg === '--out' || $arg === '--chain-id' || $arg === '--rpc' || $arg === '--quorum'
-                || $arg === '--mode' || $arg === '--max-stale-sec'
+                || $arg === '--mode' || $arg === '--max-stale-sec' || $arg === '--policy-version' || $arg === '--enforcement'
                 || $arg === '--root-authority' || $arg === '--upgrade-authority' || $arg === '--emergency-authority'
                 || $arg === '--genesis-root' || $arg === '--genesis-uri-hash' || $arg === '--genesis-policy-hash'
             ) {
@@ -664,6 +669,8 @@ final class BlackCatCli
                 $quorum,
                 $mode,
                 $maxStaleSec,
+                $policyVersion,
+                $enforcement,
                 $rootAuthority,
                 $upgradeAuthority,
                 $emergencyAuthority,
@@ -711,6 +718,15 @@ final class BlackCatCli
             fwrite(STDERR, "Invalid --max-stale-sec (expected 1..86400)\n");
             return 1;
         }
+        if (!in_array($policyVersion, [1, 2, 3], true)) {
+            fwrite(STDERR, "Invalid --policy-version (expected 1|2|3)\n");
+            return 1;
+        }
+        $enforcement = strtolower(trim($enforcement));
+        if (!in_array($enforcement, ['strict', 'warn'], true)) {
+            fwrite(STDERR, "Invalid --enforcement (expected strict|warn)\n");
+            return 1;
+        }
 
         if ($genesisRoot === null) {
             fwrite(STDERR, "Missing required --genesis-root (bytes32).\n");
@@ -724,14 +740,15 @@ final class BlackCatCli
         $this->assertBytes32($genesisRoot, 'genesis-root');
         $this->assertBytes32($genesisUriHash, 'genesis-uri-hash');
 
-        $policyDoc = [
-            'schema_version' => 1,
-            'type' => 'blackcat.trust.policy',
-            'mode' => $mode,
-            'max_stale_sec' => $maxStaleSec,
-        ];
+        $policyDoc = $this->buildTrustPolicyDoc($policyVersion, $mode, $maxStaleSec, $enforcement);
+        $computedPolicyHash = $this->computeSha256Bytes32($policyDoc);
         if ($genesisPolicyHash === null) {
-            $genesisPolicyHash = $this->computeSha256Bytes32($policyDoc);
+            $genesisPolicyHash = $computedPolicyHash;
+        } elseif (!hash_equals(strtolower($computedPolicyHash), strtolower($genesisPolicyHash))) {
+            fwrite(STDERR, "genesis-policy-hash does not match the computed policy document hash.\n");
+            fwrite(STDERR, "  computed: {$computedPolicyHash}\n");
+            fwrite(STDERR, "  provided: {$genesisPolicyHash}\n");
+            return 1;
         }
         $this->assertBytes32($genesisPolicyHash, 'genesis-policy-hash');
 
@@ -747,6 +764,8 @@ final class BlackCatCli
             'trust' => [
                 'mode' => $mode,
                 'max_stale_sec' => $maxStaleSec,
+                'policy_version' => $policyVersion,
+                'enforcement' => $enforcement,
             ],
             'authorities' => [
                 'root_authority' => $rootAuthority,
@@ -912,9 +931,21 @@ final class BlackCatCli
         }
         $this->assertBytes32($genesisUriHash, 'genesis-uri-hash');
 
+        if (is_string($genesisPolicyHash) && $genesisPolicyHash !== '' && is_array($policy)) {
+            $computed = $this->computeSha256Bytes32($policy);
+            if (!hash_equals(strtolower($computed), strtolower($genesisPolicyHash))) {
+                fwrite(STDERR, "Request is inconsistent: genesis.policy_hash does not match policy document hash.\n");
+                fwrite(STDERR, "  computed: {$computed}\n");
+                fwrite(STDERR, "  genesis:  {$genesisPolicyHash}\n");
+                return 1;
+            }
+        }
+
         if (!is_string($genesisPolicyHash) || $genesisPolicyHash === '') {
-            $mode = 'root_uri';
+            $mode = 'full';
             $maxStaleSec = 180;
+            $policyVersion = 3;
+            $enforcement = 'strict';
 
             if (is_array($trust)) {
                 $modeRaw = $trust['mode'] ?? null;
@@ -930,12 +961,23 @@ final class BlackCatCli
                 }
             }
 
-            $policyDoc = is_array($policy) ? $policy : [
-                'schema_version' => 1,
-                'type' => 'blackcat.trust.policy',
-                'mode' => $mode,
-                'max_stale_sec' => $maxStaleSec,
-            ];
+            if (is_array($trust)) {
+                $pvRaw = $trust['policy_version'] ?? null;
+                if (is_int($pvRaw)) {
+                    $policyVersion = $pvRaw;
+                } elseif (is_string($pvRaw) && trim($pvRaw) !== '' && ctype_digit(trim($pvRaw))) {
+                    $policyVersion = (int) trim($pvRaw);
+                }
+
+                $enfRaw = $trust['enforcement'] ?? null;
+                if (is_string($enfRaw) && trim($enfRaw) !== '') {
+                    $enforcement = strtolower(trim($enfRaw));
+                }
+            }
+
+            $policyDoc = is_array($policy)
+                ? $policy
+                : $this->buildTrustPolicyDoc($policyVersion, $mode, $maxStaleSec, $enforcement);
             $genesisPolicyHash = $this->computeSha256Bytes32($policyDoc);
         }
         $this->assertBytes32($genesisPolicyHash, 'genesis-policy-hash');
@@ -1760,6 +1802,8 @@ final class BlackCatCli
         ?int &$quorum,
         string &$mode,
         int &$maxStaleSec,
+        int &$policyVersion,
+        string &$enforcement,
         ?string &$rootAuthority,
         ?string &$upgradeAuthority,
         ?string &$emergencyAuthority,
@@ -1794,6 +1838,14 @@ final class BlackCatCli
 
             case '--max-stale-sec':
                 $maxStaleSec = (int) $value;
+                return;
+
+            case '--policy-version':
+                $policyVersion = (int) $value;
+                return;
+
+            case '--enforcement':
+                $enforcement = strtolower($value);
                 return;
 
             case '--root-authority':
@@ -1852,12 +1904,103 @@ final class BlackCatCli
      */
     private function computeSha256Bytes32(array $data): string
     {
-        $json = json_encode($data, JSON_UNESCAPED_SLASHES);
+        $json = $this->canonicalJsonEncode($data);
         if (!is_string($json)) {
             throw new \RuntimeException('Unable to encode JSON for hashing.');
         }
 
         return '0x' . hash('sha256', $json);
+    }
+
+    /**
+     * @return array<string,mixed>
+     */
+    private function buildTrustPolicyDoc(int $policyVersion, string $mode, int $maxStaleSec, string $enforcement): array
+    {
+        $mode = strtolower(trim($mode));
+        $enforcement = strtolower(trim($enforcement));
+
+        if (!in_array($mode, ['root_uri', 'full'], true)) {
+            throw new InvalidArgumentException('Invalid policy mode (expected root_uri|full).');
+        }
+        if ($maxStaleSec < 1 || $maxStaleSec > 86400) {
+            throw new InvalidArgumentException('Invalid policy max_stale_sec (expected 1..86400).');
+        }
+        if (!in_array($enforcement, ['strict', 'warn'], true)) {
+            throw new InvalidArgumentException('Invalid policy enforcement (expected strict|warn).');
+        }
+
+        return match ($policyVersion) {
+            1 => [
+                'schema_version' => 1,
+                'type' => 'blackcat.trust.policy',
+                'mode' => $mode,
+                'max_stale_sec' => $maxStaleSec,
+            ],
+            2 => [
+                'schema_version' => 2,
+                'type' => 'blackcat.trust.policy',
+                'mode' => $mode,
+                'max_stale_sec' => $maxStaleSec,
+                'enforcement' => $enforcement,
+            ],
+            3 => [
+                'schema_version' => 3,
+                'type' => 'blackcat.trust.policy',
+                'mode' => $mode,
+                'max_stale_sec' => $maxStaleSec,
+                'enforcement' => $enforcement,
+                'require_runtime_config_attestation' => true,
+                'runtime_config_attestation_key' => $this->runtimeConfigAttestationKeyV1(),
+                'runtime_config_attestation_must_be_locked' => true,
+            ],
+            default => throw new InvalidArgumentException('Invalid policy-version (expected 1|2|3).'),
+        };
+    }
+
+    private function runtimeConfigAttestationKeyV1(): string
+    {
+        return '0x' . hash('sha256', 'blackcat.runtime_config.canonical_sha256.v1');
+    }
+
+    private function canonicalJsonEncode(mixed $value): string
+    {
+        $normalized = $this->canonicalJsonNormalize($value);
+
+        $json = json_encode($normalized, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($json)) {
+            throw new \RuntimeException('Unable to encode canonical JSON.');
+        }
+
+        return $json;
+    }
+
+    private function canonicalJsonNormalize(mixed $value): mixed
+    {
+        if (is_array($value)) {
+            if (array_is_list($value)) {
+                $out = [];
+                foreach ($value as $v) {
+                    $out[] = $this->canonicalJsonNormalize($v);
+                }
+                return $out;
+            }
+
+            $keys = array_keys($value);
+            sort($keys, SORT_STRING);
+
+            $out = [];
+            foreach ($keys as $k) {
+                $out[$k] = $this->canonicalJsonNormalize($value[$k]);
+            }
+            return $out;
+        }
+
+        if (is_object($value)) {
+            throw new InvalidArgumentException('Objects are not supported in canonical JSON.');
+        }
+
+        return $value;
     }
 
     private function writeSecureJsonFile(string $path, string $json): void
