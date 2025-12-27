@@ -2159,11 +2159,14 @@ final class BlackCatCli
             echo "  runtime recommend             Recommend best write location\n";
             echo "  runtime init [--force]        Create runtime config at best location\n";
             echo "         [--path=FILE]          Force specific path\n";
+            echo "  runtime attestation           Compute runtime config attestation (policy v3)\n";
+            echo "         [--path=FILE]          Read specific runtime config JSON file\n";
             echo "         [--json]               JSON output\n";
             echo "\nExamples:\n";
             echo "  blackcat config runtime recommend\n";
             echo "  blackcat config runtime init\n";
             echo "  blackcat config runtime init --path=/etc/blackcat/config.runtime.json --force\n";
+            echo "  blackcat config runtime attestation --path=/etc/blackcat/config.runtime.json\n";
             return 0;
         }
 
@@ -2178,6 +2181,8 @@ final class BlackCatCli
                 echo "  recommend             Recommend best write location\n";
                 echo "  init [--force]        Create runtime config at best location\n";
                 echo "       [--path=FILE]    Force specific path\n";
+                echo "  attestation           Compute runtime config attestation (policy v3)\n";
+                echo "       [--path=FILE]    Read specific runtime config JSON file\n";
                 echo "       [--json]         JSON output\n";
                 return 0;
             }
@@ -2189,6 +2194,7 @@ final class BlackCatCli
             'runtime paths' => $this->runConfigRuntimePaths($rest),
             'runtime recommend' => $this->runConfigRuntimeRecommend($rest),
             'runtime init' => $this->runConfigRuntimeInit($rest),
+            'runtime attestation' => $this->runConfigRuntimeAttestation($rest),
             default => $this->unknown('config ' . $sub),
         };
     }
@@ -2351,6 +2357,119 @@ final class BlackCatCli
             }
         }
         return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigRuntimeAttestation(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+
+        $path = null;
+        $expectPath = false;
+
+        foreach ($args as $arg) {
+            if ($expectPath) {
+                $expectPath = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $candidate;
+                continue;
+            }
+
+            if ($arg === '--path') {
+                $expectPath = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--path=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $val;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--')) {
+                fwrite(STDERR, "Unknown option: {$arg}\n");
+                return 1;
+            }
+
+            if ($path === null) {
+                $candidate = trim((string) $arg);
+                if ($candidate !== '' && $candidate !== '1') {
+                    $path = $candidate;
+                    continue;
+                }
+            }
+
+            fwrite(STDERR, "Unexpected argument: {$arg}\n");
+            return 1;
+        }
+
+        if ($expectPath) {
+            fwrite(STDERR, "Missing value for --path\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            if ($path !== null) {
+                $repo = \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($path);
+            } else {
+                $repo = \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+            }
+
+            $data = $repo->toArray();
+            $key = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationKeyV1();
+            $value = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationValueV1($data);
+
+            $payload = [
+                'attestation' => [
+                    'key' => $key,
+                    'value' => $value,
+                ],
+                'source_path' => $repo->sourcePath(),
+            ];
+
+            if ($json) {
+                echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                return 0;
+            }
+
+            echo "Runtime config attestation (v1)\n";
+            echo "  key:   {$key}\n";
+            echo "  value: {$value}\n";
+            if (is_string($payload['source_path']) && $payload['source_path'] !== '') {
+                echo "  source_path: " . $payload['source_path'] . "\n";
+            }
+            return 0;
+        } catch (\Throwable $e) {
+            if ($json) {
+                echo json_encode(['status' => 'fail', 'message' => $e->getMessage()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                return 2;
+            }
+
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
     }
 
     private function ensureBlackcatConfigAvailable(): bool
