@@ -21,6 +21,9 @@ final class BlackCatCli
     private const ABI_SELECTOR_ROOT_AUTHORITY = '61fe51a1';
     private const ABI_SELECTOR_UPGRADE_AUTHORITY = 'dd7d7cd9';
     private const ABI_SELECTOR_EMERGENCY_AUTHORITY = '718fe851';
+    private const ABI_SELECTOR_SET_ATTESTATION = '7ac7c3e7';
+    private const ABI_SELECTOR_SET_ATTESTATION_AND_LOCK = '6538fd04';
+    private const ABI_SELECTOR_LOCK_ATTESTATION_KEY = '4c7c1612';
 
     private function __construct(
         private readonly CliConfig $config,
@@ -560,6 +563,9 @@ final class BlackCatCli
             echo "Subcommands:\n";
             echo "  request:init   Generate a trust-kernel setup request bundle (JSON)\n";
             echo "  tx:factory-create  Generate InstanceFactory.createInstance calldata (JSON)\n";
+            echo "  tx:controller-set-attestation   Generate InstanceController.setAttestation calldata (JSON)\n";
+            echo "  tx:controller-lock-attestation  Generate InstanceController.lockAttestationKey calldata (JSON)\n";
+            echo "  tx:controller-attest-runtime-config  Generate setAttestationAndLock for runtime config (policy v3)\n";
             echo "  status         Show trust-kernel runtime config status\n";
             echo "  verify         Validate trust-kernel config + RPC quorum (exit 2 on failure)\n";
             echo "\nExamples:\n";
@@ -574,6 +580,9 @@ final class BlackCatCli
             echo "    --factory=0x... \\\n";
             echo "    --request=trust-request.json --out=trust-tx.json\n";
             echo "\n";
+            echo "  blackcat trust tx:controller-attest-runtime-config \\\n";
+            echo "    --config=/etc/blackcat/config.runtime.json --out=runtime-config-attestation.tx.json\n";
+            echo "\n";
             echo "  blackcat trust status --json\n";
             echo "  blackcat trust verify --config=/etc/blackcat/config.runtime.json\n";
             return 0;
@@ -582,6 +591,9 @@ final class BlackCatCli
         return match ($sub) {
             'request:init' => $this->runTrustRequestInit($rest),
             'tx:factory-create' => $this->runTrustTxFactoryCreate($rest),
+            'tx:controller-set-attestation' => $this->runTrustTxControllerSetAttestation($rest),
+            'tx:controller-lock-attestation' => $this->runTrustTxControllerLockAttestation($rest),
+            'tx:controller-attest-runtime-config' => $this->runTrustTxControllerAttestRuntimeConfig($rest),
             'status' => $this->runTrustStatus($rest),
             'verify' => $this->runTrustVerify($rest),
             default => $this->unknown('trust ' . $sub),
@@ -1046,6 +1058,445 @@ final class BlackCatCli
         }
 
         return 0;
+    }
+
+    /**
+     * Generate InstanceController.setAttestation calldata (JSON).
+     *
+     * @param string[] $args
+     */
+    private function runTrustTxControllerSetAttestation(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$runtimeConfigPath, $args] = self::consumeRuntimeConfigPath($args);
+
+        $out = null;
+        $chainId = null;
+        $controller = null;
+        $key = null;
+        $value = null;
+
+        foreach ($args as $arg) {
+            $arg = (string) $arg;
+
+            if ($arg === '' || $arg === '1') {
+                continue;
+            }
+
+            if (str_starts_with($arg, '--out=')) {
+                $out = trim(substr($arg, 6)) ?: null;
+                continue;
+            }
+            if (str_starts_with($arg, '--chain-id=')) {
+                $chainId = (int) trim(substr($arg, 11));
+                continue;
+            }
+            if (str_starts_with($arg, '--controller=')) {
+                $controller = trim(substr($arg, 13)) ?: null;
+                continue;
+            }
+            if (str_starts_with($arg, '--key=')) {
+                $key = trim(substr($arg, 6)) ?: null;
+                continue;
+            }
+            if (str_starts_with($arg, '--value=')) {
+                $value = trim(substr($arg, 8)) ?: null;
+                continue;
+            }
+
+            if ($arg === '--out' || $arg === '--chain-id' || $arg === '--controller' || $arg === '--key' || $arg === '--value') {
+                fwrite(STDERR, "Use --out=, --chain-id=, --controller=, --key=, --value=\n");
+                return 1;
+            }
+
+            fwrite(STDERR, "Unknown argument: {$arg}\n");
+            return 1;
+        }
+
+        [$chainId, $controller] = $this->fillTrustChainDefaultsFromRuntimeConfig($chainId, $controller, $runtimeConfigPath);
+
+        if ($chainId === null || $chainId <= 0) {
+            fwrite(STDERR, "Missing/invalid --chain-id (expected > 0)\n");
+            return 1;
+        }
+        if ($controller === null) {
+            fwrite(STDERR, "Missing --controller (or provide --config with trust.web3.contracts.instance_controller)\n");
+            return 1;
+        }
+        if ($key === null || $value === null) {
+            fwrite(STDERR, "Usage: blackcat trust tx:controller-set-attestation --controller=0x... --key=0x... --value=0x... [--chain-id=4207] [--out=FILE] [--json]\n");
+            return 1;
+        }
+
+        $this->assertEvmAddress($controller, 'controller');
+        $this->assertBytes32($key, 'key');
+        $this->assertBytes32($value, 'value');
+
+        $data = $this->buildControllerSetAttestationCalldata($key, $value);
+
+        $tx = [
+            'chain_id' => $chainId,
+            'to' => strtolower($controller),
+            'value' => '0x0',
+            'data' => $data,
+            'data_sha256' => $this->sha256HexData($data),
+            'method' => 'setAttestation(bytes32,bytes32)',
+            'args' => [
+                'key' => strtolower($key),
+                'value' => strtolower($value),
+            ],
+            'note' => 'Must be executed by rootAuthority (EOA/Safe) of the InstanceController.',
+            'safe' => [
+                'operation' => 'CALL',
+                'note' => 'For Safe: set (to,value,data,operation) to these values and confirm with the required threshold.',
+            ],
+        ];
+
+        $outJson = json_encode($tx, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($outJson)) {
+            fwrite(STDERR, "Unable to encode JSON\n");
+            return 1;
+        }
+
+        if ($out !== null) {
+            try {
+                $this->writeSecureJsonFile($out, $outJson);
+            } catch (\Throwable $e) {
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+                return 2;
+            }
+        }
+
+        if ($json || $out === null) {
+            echo $outJson . PHP_EOL;
+        } else {
+            echo "Wrote: {$out}\n";
+        }
+
+        return 0;
+    }
+
+    /**
+     * Generate InstanceController.lockAttestationKey calldata (JSON).
+     *
+     * @param string[] $args
+     */
+    private function runTrustTxControllerLockAttestation(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$runtimeConfigPath, $args] = self::consumeRuntimeConfigPath($args);
+
+        $out = null;
+        $chainId = null;
+        $controller = null;
+        $key = null;
+
+        foreach ($args as $arg) {
+            $arg = (string) $arg;
+
+            if ($arg === '' || $arg === '1') {
+                continue;
+            }
+
+            if (str_starts_with($arg, '--out=')) {
+                $out = trim(substr($arg, 6)) ?: null;
+                continue;
+            }
+            if (str_starts_with($arg, '--chain-id=')) {
+                $chainId = (int) trim(substr($arg, 11));
+                continue;
+            }
+            if (str_starts_with($arg, '--controller=')) {
+                $controller = trim(substr($arg, 13)) ?: null;
+                continue;
+            }
+            if (str_starts_with($arg, '--key=')) {
+                $key = trim(substr($arg, 6)) ?: null;
+                continue;
+            }
+
+            if ($arg === '--out' || $arg === '--chain-id' || $arg === '--controller' || $arg === '--key') {
+                fwrite(STDERR, "Use --out=, --chain-id=, --controller=, --key=\n");
+                return 1;
+            }
+
+            fwrite(STDERR, "Unknown argument: {$arg}\n");
+            return 1;
+        }
+
+        [$chainId, $controller] = $this->fillTrustChainDefaultsFromRuntimeConfig($chainId, $controller, $runtimeConfigPath);
+
+        if ($chainId === null || $chainId <= 0) {
+            fwrite(STDERR, "Missing/invalid --chain-id (expected > 0)\n");
+            return 1;
+        }
+        if ($controller === null) {
+            fwrite(STDERR, "Missing --controller (or provide --config with trust.web3.contracts.instance_controller)\n");
+            return 1;
+        }
+        if ($key === null) {
+            fwrite(STDERR, "Usage: blackcat trust tx:controller-lock-attestation --controller=0x... --key=0x... [--chain-id=4207] [--out=FILE] [--json]\n");
+            return 1;
+        }
+
+        $this->assertEvmAddress($controller, 'controller');
+        $this->assertBytes32($key, 'key');
+
+        $data = $this->buildControllerLockAttestationKeyCalldata($key);
+
+        $tx = [
+            'chain_id' => $chainId,
+            'to' => strtolower($controller),
+            'value' => '0x0',
+            'data' => $data,
+            'data_sha256' => $this->sha256HexData($data),
+            'method' => 'lockAttestationKey(bytes32)',
+            'args' => [
+                'key' => strtolower($key),
+            ],
+            'note' => 'Must be executed by rootAuthority (EOA/Safe) of the InstanceController.',
+            'safe' => [
+                'operation' => 'CALL',
+                'note' => 'For Safe: set (to,value,data,operation) to these values and confirm with the required threshold.',
+            ],
+        ];
+
+        $outJson = json_encode($tx, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($outJson)) {
+            fwrite(STDERR, "Unable to encode JSON\n");
+            return 1;
+        }
+
+        if ($out !== null) {
+            try {
+                $this->writeSecureJsonFile($out, $outJson);
+            } catch (\Throwable $e) {
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+                return 2;
+            }
+        }
+
+        if ($json || $out === null) {
+            echo $outJson . PHP_EOL;
+        } else {
+            echo "Wrote: {$out}\n";
+        }
+
+        return 0;
+    }
+
+    /**
+     * Convenience: compute runtime-config attestation (policy v3) and generate InstanceController.setAttestationAndLock calldata (JSON).
+     *
+     * @param string[] $args
+     */
+    private function runTrustTxControllerAttestRuntimeConfig(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$runtimeConfigPath, $args] = self::consumeRuntimeConfigPath($args);
+
+        $out = null;
+        $chainId = null;
+        $controller = null;
+
+        foreach ($args as $arg) {
+            $arg = (string) $arg;
+
+            if ($arg === '' || $arg === '1') {
+                continue;
+            }
+
+            if (str_starts_with($arg, '--out=')) {
+                $out = trim(substr($arg, 6)) ?: null;
+                continue;
+            }
+            if (str_starts_with($arg, '--chain-id=')) {
+                $chainId = (int) trim(substr($arg, 11));
+                continue;
+            }
+            if (str_starts_with($arg, '--controller=')) {
+                $controller = trim(substr($arg, 13)) ?: null;
+                continue;
+            }
+
+            if ($arg === '--out' || $arg === '--chain-id' || $arg === '--controller') {
+                fwrite(STDERR, "Use --out=, --chain-id=, --controller= (and --config=FILE for runtime config)\n");
+                return 1;
+            }
+
+            fwrite(STDERR, "Unknown argument: {$arg}\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $repo = $runtimeConfigPath !== null
+                ? \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($runtimeConfigPath)
+                : \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+        } catch (\Throwable $e) {
+            if ($json) {
+                echo json_encode(['status' => 'fail', 'message' => $e->getMessage()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                return 2;
+            }
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        $data = $repo->toArray();
+        $key = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationKeyV1();
+        $value = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationValueV1($data);
+
+        if ($chainId === null) {
+            $cid = $repo->get('trust.web3.chain_id');
+            if (is_int($cid)) {
+                $chainId = $cid;
+            } elseif (is_string($cid) && trim($cid) !== '' && ctype_digit(trim($cid))) {
+                $chainId = (int) trim($cid);
+            }
+        }
+
+        if ($controller === null) {
+            $controllerRaw = $repo->get('trust.web3.contracts.instance_controller');
+            if (is_string($controllerRaw) && trim($controllerRaw) !== '') {
+                $controller = trim($controllerRaw);
+            }
+        }
+
+        if ($chainId === null || $chainId <= 0) {
+            fwrite(STDERR, "Missing/invalid chain_id (provide --chain-id or set trust.web3.chain_id in runtime config)\n");
+            return 1;
+        }
+        if ($controller === null) {
+            fwrite(STDERR, "Missing controller (provide --controller or set trust.web3.contracts.instance_controller in runtime config)\n");
+            return 1;
+        }
+
+        $this->assertEvmAddress($controller, 'controller');
+        $this->assertBytes32($key, 'key');
+        $this->assertBytes32($value, 'value');
+
+        $calldata = $this->buildControllerSetAttestationAndLockCalldata($key, $value);
+
+        $tx = [
+            'chain_id' => $chainId,
+            'to' => strtolower($controller),
+            'value' => '0x0',
+            'data' => $calldata,
+            'data_sha256' => $this->sha256HexData($calldata),
+            'method' => 'setAttestationAndLock(bytes32,bytes32)',
+            'args' => [
+                'key' => strtolower($key),
+                'value' => strtolower($value),
+            ],
+            'attestation' => [
+                'source_path' => $repo->sourcePath(),
+                'description' => 'canonical_sha256(runtime_config_json) commitment (policy v3)',
+            ],
+            'note' => 'Must be executed by rootAuthority (EOA/Safe). After mining, the TrustKernel should verify attestation + lock automatically.',
+            'safe' => [
+                'operation' => 'CALL',
+                'note' => 'For Safe: set (to,value,data,operation) to these values and confirm with the required threshold.',
+            ],
+        ];
+
+        $outJson = json_encode($tx, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($outJson)) {
+            fwrite(STDERR, "Unable to encode JSON\n");
+            return 1;
+        }
+
+        if ($out !== null) {
+            try {
+                $this->writeSecureJsonFile($out, $outJson);
+            } catch (\Throwable $e) {
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+                return 2;
+            }
+        }
+
+        if ($json || $out === null) {
+            echo $outJson . PHP_EOL;
+        } else {
+            echo "Wrote: {$out}\n";
+        }
+
+        return 0;
+    }
+
+    /**
+     * @return array{0:?int,1:?string}
+     */
+    private function fillTrustChainDefaultsFromRuntimeConfig(?int $chainId, ?string $controller, ?string $runtimeConfigPath): array
+    {
+        if (($chainId !== null && $controller !== null) || !$this->ensureBlackcatConfigAvailable()) {
+            return [$chainId, $controller];
+        }
+
+        try {
+            $this->initRuntimeConfig($runtimeConfigPath);
+        } catch (\Throwable) {
+            return [$chainId, $controller];
+        }
+
+        if (!\BlackCat\Config\Runtime\Config::isInitialized()) {
+            return [$chainId, $controller];
+        }
+
+        $repo = \BlackCat\Config\Runtime\Config::repo();
+
+        if ($chainId === null) {
+            try {
+                $chainId = $repo->requireInt('trust.web3.chain_id');
+            } catch (\Throwable) {
+                $chainId = null;
+            }
+        }
+
+        if ($controller === null) {
+            $raw = $repo->get('trust.web3.contracts.instance_controller');
+            if (is_string($raw) && trim($raw) !== '') {
+                $controller = trim($raw);
+            }
+        }
+
+        return [$chainId, $controller];
+    }
+
+    private function buildControllerSetAttestationCalldata(string $key, string $value): string
+    {
+        $this->assertBytes32($key, 'key');
+        $this->assertBytes32($value, 'value');
+
+        $data = self::ABI_SELECTOR_SET_ATTESTATION
+            . $this->abiEncodeBytes32Word($key)
+            . $this->abiEncodeBytes32Word($value);
+
+        return '0x' . strtolower($data);
+    }
+
+    private function buildControllerSetAttestationAndLockCalldata(string $key, string $value): string
+    {
+        $this->assertBytes32($key, 'key');
+        $this->assertBytes32($value, 'value');
+
+        $data = self::ABI_SELECTOR_SET_ATTESTATION_AND_LOCK
+            . $this->abiEncodeBytes32Word($key)
+            . $this->abiEncodeBytes32Word($value);
+
+        return '0x' . strtolower($data);
+    }
+
+    private function buildControllerLockAttestationKeyCalldata(string $key): string
+    {
+        $this->assertBytes32($key, 'key');
+
+        $data = self::ABI_SELECTOR_LOCK_ATTESTATION_KEY
+            . $this->abiEncodeBytes32Word($key);
+
+        return '0x' . strtolower($data);
     }
 
     /**
