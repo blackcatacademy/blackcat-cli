@@ -2607,17 +2607,39 @@ final class BlackCatCli
             echo "Usage: blackcat config <subcommand> [args...]\n\n";
             echo "Subcommands:\n";
             echo "  runtime paths                 Print read/write candidate paths\n";
+            echo "  runtime scan                  Scan for first usable runtime config\n";
             echo "  runtime recommend             Recommend best write location\n";
+            echo "  runtime template              Print runtime config templates\n";
             echo "  runtime init [--force]        Create runtime config at best location\n";
             echo "         [--path=FILE]          Force specific path\n";
-            echo "  runtime attestation           Compute runtime config attestation (policy v3)\n";
+            echo "         [--template=NAME]      Seed with template (trust-edgen, trust-edgen-compat)\n";
+            echo "  runtime doctor                Inspect runtime config posture\n";
             echo "         [--path=FILE]          Read specific runtime config JSON file\n";
+            echo "         [--strict]             Fail on warnings\n";
+            echo "  runtime attestation           Compute kernel attestations\n";
+            echo "         [runtime-config|http-allowed-hosts|composer-lock|php-fingerprint|image-digest]\n";
+            echo "         [--path=FILE]          Runtime config path (or attestation input path)\n";
             echo "         [--json]               JSON output\n";
+            echo "  profile list                  List config profiles\n";
+            echo "  profile env <profile>         Print env vars for profile\n";
+            echo "  profile modules <profile>     Print modules for profile\n";
+            echo "  profile info <profile>        Print profile JSON\n";
+            echo "  profile render-env <profile>  Render .env file\n";
+            echo "  integration list <profile>    List integrations\n";
+            echo "  integration check <profile>   Validate integrations\n";
+            echo "  telemetry tail <profile>      Tail telemetry events\n";
+            echo "  security check <profile>      Run security checklist\n";
+            echo "  security scan [path]          Scan source tree for policy violations\n";
+            echo "  security attack-surface [path]Scan source tree for attack-surface findings\n";
+            echo "  check                         Run security+integration checks for all profiles\n";
             echo "\nExamples:\n";
             echo "  blackcat config runtime recommend\n";
-            echo "  blackcat config runtime init\n";
+            echo "  blackcat config runtime template trust-edgen --json > /tmp/config.seed.json\n";
+            echo "  blackcat config runtime init --template=trust-edgen --force\n";
+            echo "  blackcat config runtime doctor --strict\n";
             echo "  blackcat config runtime init --path=/etc/blackcat/config.runtime.json --force\n";
             echo "  blackcat config runtime attestation --path=/etc/blackcat/config.runtime.json\n";
+            echo "  blackcat config runtime attestation http-allowed-hosts --path=/etc/blackcat/config.runtime.json --json\n";
             return 0;
         }
 
@@ -2626,26 +2648,94 @@ final class BlackCatCli
             $action = (string) ($rest[0] ?? 'help');
             if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
                 echo "config runtime\n";
-                echo "Usage: blackcat config runtime <paths|recommend|init> [options]\n\n";
+                echo "Usage: blackcat config runtime <paths|scan|recommend|template|init|doctor|attestation> [options]\n\n";
                 echo "Subcommands:\n";
                 echo "  paths                 Print read/write candidate paths\n";
+                echo "  scan                  Scan for first usable runtime config\n";
                 echo "  recommend             Recommend best write location\n";
+                echo "  template              Print runtime config templates\n";
                 echo "  init [--force]        Create runtime config at best location\n";
                 echo "       [--path=FILE]    Force specific path\n";
-                echo "  attestation           Compute runtime config attestation (policy v3)\n";
+                echo "       [--template=NAME]Seed with template (trust-edgen, trust-edgen-compat)\n";
+                echo "  doctor                Inspect runtime config posture\n";
+                echo "       [--path=FILE]    Read specific runtime config JSON file\n";
+                echo "       [--strict]       Fail on warnings\n";
+                echo "  attestation           Compute kernel attestations\n";
                 echo "       [--path=FILE]    Read specific runtime config JSON file\n";
                 echo "       [--json]         JSON output\n";
                 return 0;
             }
             $rest = array_slice($rest, 1);
             $cmd = 'runtime ' . $action;
+        } elseif ($cmd === 'profile') {
+            $action = (string) ($rest[0] ?? 'help');
+            if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+                echo "config profile\n";
+                echo "Usage: blackcat config profile <list|env|modules|info|render-env> [args...]\n\n";
+                echo "Options:\n";
+                echo "  --profiles=FILE   Profile config file (defaults to blackcat-config/config/profiles.php)\n";
+                echo "  --json            JSON output (where supported)\n";
+                return 0;
+            }
+            $rest = array_slice($rest, 1);
+            $cmd = 'profile ' . $action;
+        } elseif ($cmd === 'integration') {
+            $action = (string) ($rest[0] ?? 'help');
+            if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+                echo "config integration\n";
+                echo "Usage: blackcat config integration <list|check> <profile> [options]\n\n";
+                echo "Options:\n";
+                echo "  --profiles=FILE   Profile config file (defaults to blackcat-config/config/profiles.php)\n";
+                return 0;
+            }
+            $rest = array_slice($rest, 1);
+            $cmd = 'integration ' . $action;
+        } elseif ($cmd === 'telemetry') {
+            $action = (string) ($rest[0] ?? 'help');
+            if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+                echo "config telemetry\n";
+                echo "Usage: blackcat config telemetry tail <profile> [lines] [options]\n\n";
+                echo "Options:\n";
+                echo "  --profiles=FILE   Profile config file (defaults to blackcat-config/config/profiles.php)\n";
+                return 0;
+            }
+            $rest = array_slice($rest, 1);
+            $cmd = 'telemetry ' . $action;
+        } elseif ($cmd === 'security') {
+            $action = (string) ($rest[0] ?? 'help');
+            if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+                echo "config security\n";
+                echo "Usage: blackcat config security <check|scan|attack-surface> [args...]\n\n";
+                echo "Options:\n";
+                echo "  --profiles=FILE   Profile config file (for 'check')\n";
+                echo "  --path=DIR        Root directory to scan (for 'scan' and 'attack-surface')\n";
+                echo "  --json            JSON output\n";
+                return 0;
+            }
+            $rest = array_slice($rest, 1);
+            $cmd = 'security ' . $action;
         }
 
         return match ($cmd) {
             'runtime paths' => $this->runConfigRuntimePaths($rest),
+            'runtime scan' => $this->runConfigRuntimeScan($rest),
             'runtime recommend' => $this->runConfigRuntimeRecommend($rest),
+            'runtime template' => $this->runConfigRuntimeTemplate($rest),
             'runtime init' => $this->runConfigRuntimeInit($rest),
+            'runtime doctor' => $this->runConfigRuntimeDoctor($rest),
             'runtime attestation' => $this->runConfigRuntimeAttestation($rest),
+            'profile list' => $this->runConfigProfileList($rest),
+            'profile env' => $this->runConfigProfileEnv($rest),
+            'profile modules' => $this->runConfigProfileModules($rest),
+            'profile info' => $this->runConfigProfileInfo($rest),
+            'profile render-env' => $this->runConfigProfileRenderEnv($rest),
+            'integration list' => $this->runConfigIntegrationList($rest),
+            'integration check' => $this->runConfigIntegrationCheck($rest),
+            'telemetry tail' => $this->runConfigTelemetryTail($rest),
+            'security check' => $this->runConfigSecurityCheck($rest),
+            'security scan' => $this->runConfigSecurityScan($rest),
+            'security attack-surface' => $this->runConfigSecurityAttackSurface($rest),
+            'check' => $this->runConfigCheck($rest),
             default => $this->unknown('config ' . $sub),
         };
     }
@@ -2688,6 +2778,53 @@ final class BlackCatCli
     /**
      * @param string[] $args
      */
+    private function runConfigRuntimeScan(array $args): int
+    {
+        [$json, $remaining] = $this->consumeFlag($args, '--json');
+        if ($remaining !== []) {
+            fwrite(STDERR, "config runtime scan does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $scan = \BlackCat\Config\Runtime\ConfigBootstrap::scanFirstAvailableJsonFile();
+
+        $payload = [
+            'selected' => $scan['selected'],
+            'rejected' => $scan['rejected'],
+            'paths' => $scan['paths'],
+        ];
+
+        if ($json) {
+            echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return 0;
+        }
+
+        if (is_string($payload['selected']) && $payload['selected'] !== '') {
+            echo "Selected runtime config:\n";
+            echo "  " . $payload['selected'] . "\n";
+        } else {
+            echo "No usable runtime config found.\n";
+        }
+
+        if ($payload['rejected'] !== []) {
+            echo "\nRejected files:\n";
+            /** @var array<string,string> $rejected */
+            $rejected = $payload['rejected'];
+            foreach ($rejected as $path => $reason) {
+                echo "  - {$path}: {$reason}\n";
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
     private function runConfigRuntimeRecommend(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
@@ -2723,14 +2860,62 @@ final class BlackCatCli
     /**
      * @param string[] $args
      */
+    private function runConfigRuntimeTemplate(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+
+        $name = $args[0] ?? null;
+        if ($name === null || $name === '' || $name === 'help' || $name === '--help' || $name === '-h') {
+            echo "config runtime template\n";
+            echo "Usage: blackcat config runtime template <trust-edgen|trust-edgen-compat> [--json]\n";
+            return 0;
+        }
+
+        if (count($args) > 1) {
+            fwrite(STDERR, "config runtime template does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $mode = match (strtolower(trim((string) $name))) {
+                'trust-edgen' => 'full',
+                'trust-edgen-compat' => 'root_uri',
+                default => throw new \RuntimeException('Unknown runtime template: ' . $name),
+            };
+
+            /** @var array<string,mixed> $payload */
+            $payload = \BlackCat\Config\Runtime\Templates\TrustKernelEdgenTemplate::build($mode);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        if ($json) {
+            echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return 0;
+        }
+
+        echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
     private function runConfigRuntimeInit(array $args): int
     {
         [$json, $args] = $this->consumeFlag($args, '--json');
         [$force, $args] = $this->consumeFlag($args, '--force');
 
         $path = null;
+        $template = null;
         $filtered = [];
         $expectPath = false;
+        $expectTemplate = false;
 
         foreach ($args as $arg) {
             if ($expectPath) {
@@ -2748,7 +2933,27 @@ final class BlackCatCli
                 continue;
             }
 
+            if ($expectTemplate) {
+                $expectTemplate = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --template\n");
+                    return 1;
+                }
+                if ($template !== null) {
+                    fwrite(STDERR, "Duplicate --template option\n");
+                    return 1;
+                }
+                $template = $candidate;
+                continue;
+            }
+
             if ($arg === '--path') {
+                $expectPath = true;
+                continue;
+            }
+
+            if ($arg === '--out') {
                 $expectPath = true;
                 continue;
             }
@@ -2767,11 +2972,49 @@ final class BlackCatCli
                 continue;
             }
 
+            if (str_starts_with($arg, '--out=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --out\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --out/--path option\n");
+                    return 1;
+                }
+                $path = $val;
+                continue;
+            }
+
+            if ($arg === '--template') {
+                $expectTemplate = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--template=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --template\n");
+                    return 1;
+                }
+                if ($template !== null) {
+                    fwrite(STDERR, "Duplicate --template option\n");
+                    return 1;
+                }
+                $template = $val;
+                continue;
+            }
+
             $filtered[] = $arg;
         }
 
         if ($expectPath) {
             fwrite(STDERR, "Missing value for --path\n");
+            return 1;
+        }
+
+        if ($expectTemplate) {
+            fwrite(STDERR, "Missing value for --template\n");
             return 1;
         }
 
@@ -2785,7 +3028,19 @@ final class BlackCatCli
         }
 
         try {
-            $res = \BlackCat\Config\Runtime\RuntimeConfigInstaller::init([], $path, $force);
+            $payload = [];
+            if ($template !== null) {
+                $t = strtolower(trim((string) $template));
+                if ($t === 'trust-edgen') {
+                    $payload = \BlackCat\Config\Runtime\Templates\TrustKernelEdgenTemplate::build('full');
+                } elseif ($t === 'trust-edgen-compat') {
+                    $payload = \BlackCat\Config\Runtime\Templates\TrustKernelEdgenTemplate::build('root_uri');
+                } else {
+                    throw new \RuntimeException('Unknown runtime template: ' . $template);
+                }
+            }
+
+            $res = \BlackCat\Config\Runtime\RuntimeConfigInstaller::init($payload, $path, $force);
         } catch (\Throwable $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             return 2;
@@ -2813,9 +3068,10 @@ final class BlackCatCli
     /**
      * @param string[] $args
      */
-    private function runConfigRuntimeAttestation(array $args): int
+    private function runConfigRuntimeDoctor(array $args): int
     {
         [$json, $args] = $this->consumeFlag($args, '--json');
+        [$strict, $args] = $this->consumeFlag($args, '--strict');
 
         $path = null;
         $expectPath = false;
@@ -2882,36 +3138,373 @@ final class BlackCatCli
         }
 
         try {
-            if ($path !== null) {
-                $repo = \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($path);
-            } else {
-                $repo = \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+            $repo = $path !== null
+                ? \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($path)
+                : \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+
+            $res = \BlackCat\Config\Runtime\RuntimeDoctor::inspect($repo);
+        } catch (\Throwable $e) {
+            if ($json) {
+                echo json_encode(['status' => 'fail', 'message' => $e->getMessage()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                return 2;
+            }
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        $errors = $res['summary']['errors'];
+        $warnings = $res['summary']['warnings'];
+
+        if ($json) {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            if ($errors > 0 || ($strict && $warnings > 0)) {
+                return 2;
+            }
+            return 0;
+        }
+
+        echo "Runtime doctor\n";
+        echo "  ok:         " . ($res['ok'] ? 'yes' : 'no') . "\n";
+        echo "  ok_strict:  " . ($res['ok_strict'] ? 'yes' : 'no') . "\n";
+        echo "  tier:       " . $res['tier'] . "\n";
+        if ($res['source_path'] !== null && $res['source_path'] !== '') {
+            echo "  source_path: " . $res['source_path'] . "\n";
+        }
+        echo "  summary:    errors={$errors} warnings={$warnings} infos=" . $res['summary']['infos'] . "\n";
+
+        if ($res['findings'] !== []) {
+            echo "\nFindings:\n";
+            foreach ($res['findings'] as $finding) {
+                echo "  - [" . $finding['severity'] . "] " . $finding['code'] . ' ' . $finding['message'] . "\n";
+            }
+        }
+
+        if ($errors > 0 || ($strict && $warnings > 0)) {
+            return 2;
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigRuntimeAttestation(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+
+        $type = null;
+        $path = null;
+        $digest = null;
+        $expectPath = false;
+        $expectDigest = false;
+
+        foreach ($args as $arg) {
+            if ($expectPath) {
+                $expectPath = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $candidate;
+                continue;
             }
 
-            $data = $repo->toArray();
-            $key = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationKeyV1();
-            $value = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationValueV1($data);
+            if ($expectDigest) {
+                $expectDigest = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --digest\n");
+                    return 1;
+                }
+                if ($digest !== null) {
+                    fwrite(STDERR, "Duplicate --digest option\n");
+                    return 1;
+                }
+                $digest = $candidate;
+                continue;
+            }
 
-            $payload = [
-                'attestation' => [
-                    'key' => $key,
-                    'value' => $value,
-                ],
-                'source_path' => $repo->sourcePath(),
-            ];
+            if ($arg === '--path') {
+                $expectPath = true;
+                continue;
+            }
 
-            if ($json) {
-                echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            if (str_starts_with($arg, '--path=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $val;
+                continue;
+            }
+
+            if ($arg === '--digest') {
+                $expectDigest = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--digest=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --digest\n");
+                    return 1;
+                }
+                if ($digest !== null) {
+                    fwrite(STDERR, "Duplicate --digest option\n");
+                    return 1;
+                }
+                $digest = $val;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--')) {
+                fwrite(STDERR, "Unknown option: {$arg}\n");
+                return 1;
+            }
+
+            $candidate = trim((string) $arg);
+            if ($candidate === '' || $candidate === '1') {
+                continue;
+            }
+
+            if ($type === null && $path === null) {
+                if (in_array($candidate, ['runtime-config', 'http-allowed-hosts', 'composer-lock', 'php-fingerprint', 'image-digest'], true)) {
+                    $type = $candidate;
+                    continue;
+                }
+
+                if (is_file($candidate)) {
+                    $path = $candidate;
+                    continue;
+                }
+
+                // Treat unknown tokens as type to fail-fast with a clear message.
+                $type = $candidate;
+                continue;
+            }
+
+            if ($path === null) {
+                $path = $candidate;
+                continue;
+            }
+
+            fwrite(STDERR, "Unexpected argument: {$arg}\n");
+            return 1;
+        }
+
+        if ($expectPath) {
+            fwrite(STDERR, "Missing value for --path\n");
+            return 1;
+        }
+
+        if ($expectDigest) {
+            fwrite(STDERR, "Missing value for --digest\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $type = $type ?? 'runtime-config';
+
+            if ($type === 'runtime-config') {
+                $repo = $path !== null
+                    ? \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($path)
+                    : \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+
+                $data = $repo->toArray();
+                $key = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationKeyV1();
+                $value = \BlackCat\Config\Security\KernelAttestations::runtimeConfigAttestationValueV1($data);
+
+                $payload = [
+                    'attestation' => ['key' => $key, 'value' => $value],
+                    'source_path' => $repo->sourcePath(),
+                ];
+
+                if ($json) {
+                    echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                    return 0;
+                }
+
+                echo "Runtime config attestation (v1)\n";
+                echo "  key:   {$key}\n";
+                echo "  value: {$value}\n";
+                if (is_string($payload['source_path']) && $payload['source_path'] !== '') {
+                    echo "  source_path: " . $payload['source_path'] . "\n";
+                }
                 return 0;
             }
 
-            echo "Runtime config attestation (v1)\n";
-            echo "  key:   {$key}\n";
-            echo "  value: {$value}\n";
-            if (is_string($payload['source_path']) && $payload['source_path'] !== '') {
-                echo "  source_path: " . $payload['source_path'] . "\n";
+            if ($type === 'http-allowed-hosts') {
+                $repo = $path !== null
+                    ? \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($path)
+                    : \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+
+                $raw = $repo->get('http.allowed_hosts');
+                if ($raw === null || $raw === '') {
+                    throw new \RuntimeException('Missing required config list: http.allowed_hosts');
+                }
+                if (!is_array($raw)) {
+                    throw new \RuntimeException('Invalid config type for http.allowed_hosts (expected list of strings).');
+                }
+
+                $payloadRaw = \BlackCat\Config\Security\KernelAttestations::httpAllowedHostsPayloadV1($raw);
+                $key = \BlackCat\Config\Security\KernelAttestations::httpAllowedHostsAttestationKeyV1();
+                $value = \BlackCat\Config\Security\CanonicalJson::sha256Bytes32($payloadRaw);
+
+                $out = [
+                    'attestation' => ['key' => $key, 'value' => $value],
+                    'payload' => $payloadRaw,
+                    'source_path' => $repo->sourcePath(),
+                ];
+
+                if ($json) {
+                    echo json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                    return 0;
+                }
+
+                echo "HTTP allowed hosts attestation (v1)\n";
+                echo "  key:   {$key}\n";
+                echo "  value: {$value}\n";
+                return 0;
             }
-            return 0;
+
+            if ($type === 'composer-lock') {
+                $target = $path;
+
+                if ($target === null) {
+                    $repo = \BlackCat\Config\Runtime\ConfigBootstrap::loadFirstAvailableJsonFile();
+                    $rootDirRaw = $repo->get('trust.integrity.root_dir');
+                    if (!is_string($rootDirRaw) || trim($rootDirRaw) === '') {
+                        throw new \RuntimeException('Unable to derive composer.lock path (missing trust.integrity.root_dir). Use --path=...');
+                    }
+                    $rootDir = $repo->resolvePath($rootDirRaw);
+                    $target = rtrim($rootDir, "/\\") . DIRECTORY_SEPARATOR . 'composer.lock';
+                }
+
+                $policy = new \BlackCat\Config\Security\ConfigFilePolicy(
+                    allowSymlinks: false,
+                    allowWorldReadable: true,
+                    allowGroupWritable: false,
+                    allowWorldWritable: false,
+                    maxBytes: 8 * 1024 * 1024,
+                    checkParentDirs: true,
+                    enforceOwner: false,
+                );
+
+                \BlackCat\Config\Security\SecureFile::assertSecureReadableFile($target, $policy);
+
+                $rawLock = file_get_contents($target);
+                if ($rawLock === false) {
+                    throw new \RuntimeException('Unable to read composer.lock: ' . $target);
+                }
+
+                /** @var mixed $decoded */
+                $decoded = json_decode($rawLock, true);
+                if (!is_array($decoded)) {
+                    throw new \RuntimeException('composer.lock must decode to an object/array: ' . $target);
+                }
+
+                /** @var array<string,mixed> $decoded */
+                $key = \BlackCat\Config\Security\KernelAttestations::composerLockAttestationKeyV1();
+                $value = \BlackCat\Config\Security\KernelAttestations::composerLockAttestationValueV1($decoded);
+
+                $out = [
+                    'attestation' => ['key' => $key, 'value' => $value],
+                    'source_path' => $target,
+                ];
+
+                if ($json) {
+                    echo json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                    return 0;
+                }
+
+                echo "Composer.lock attestation (v1)\n";
+                echo "  key:   {$key}\n";
+                echo "  value: {$value}\n";
+                echo "  source_path: {$target}\n";
+                return 0;
+            }
+
+            if ($type === 'php-fingerprint') {
+                $payloadV2 = \BlackCat\Config\Security\KernelAttestations::phpFingerprintPayloadV2();
+                $keyV2 = \BlackCat\Config\Security\KernelAttestations::phpFingerprintAttestationKeyV2();
+                $valueV2 = \BlackCat\Config\Security\KernelAttestations::phpFingerprintAttestationValueV2($payloadV2);
+
+                $payloadV1 = \BlackCat\Config\Security\KernelAttestations::phpFingerprintPayloadV1();
+                $keyV1 = \BlackCat\Config\Security\KernelAttestations::phpFingerprintAttestationKeyV1();
+                $valueV1 = \BlackCat\Config\Security\KernelAttestations::phpFingerprintAttestationValueV1($payloadV1);
+
+                $out = [
+                    'attestation_v2' => ['key' => $keyV2, 'value' => $valueV2],
+                    'payload_v2' => $payloadV2,
+                    'attestation_v1' => ['key' => $keyV1, 'value' => $valueV1],
+                    'payload_v1' => $payloadV1,
+                ];
+
+                if ($json) {
+                    echo json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                    return 0;
+                }
+
+                echo "PHP fingerprint attestation\n";
+                echo "  v2.key:   {$keyV2}\n";
+                echo "  v2.value: {$valueV2}\n";
+                echo "  v1.key:   {$keyV1}\n";
+                echo "  v1.value: {$valueV1}\n";
+                return 0;
+            }
+
+            if ($type === 'image-digest') {
+                $target = $path ?? '/etc/blackcat/image.digest';
+                $sourcePath = null;
+
+                if ($digest === null) {
+                    $policy = \BlackCat\Config\Security\ConfigFilePolicy::publicReadable();
+                    \BlackCat\Config\Security\SecureFile::assertSecureReadableFile($target, $policy);
+                    $rawDigest = file_get_contents($target);
+                    if ($rawDigest === false) {
+                        throw new \RuntimeException('Unable to read image digest file: ' . $target);
+                    }
+                    $digest = $rawDigest;
+                    $sourcePath = $target;
+                }
+
+                $key = \BlackCat\Config\Security\KernelAttestations::imageDigestAttestationKeyV1();
+                $value = \BlackCat\Config\Security\KernelAttestations::imageDigestAttestationValueV1($digest);
+
+                $out = [
+                    'attestation' => ['key' => $key, 'value' => $value],
+                    'source_path' => $sourcePath,
+                ];
+
+                if ($json) {
+                    echo json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                    return 0;
+                }
+
+                echo "Image digest attestation (v1)\n";
+                echo "  key:   {$key}\n";
+                echo "  value: {$value}\n";
+                if (is_string($sourcePath) && $sourcePath !== '') {
+                    echo "  source_path: {$sourcePath}\n";
+                }
+                return 0;
+            }
+
+            throw new \RuntimeException('Unknown attestation type: ' . $type);
         } catch (\Throwable $e) {
             if ($json) {
                 echo json_encode(['status' => 'fail', 'message' => $e->getMessage()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
@@ -2920,6 +3513,666 @@ final class BlackCatCli
 
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             return 2;
+        }
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigProfileList(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        if ($args !== []) {
+            fwrite(STDERR, "config profile list does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        if ($json) {
+            echo json_encode($profileConfig->toArray(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return 0;
+        }
+
+        foreach ($profileConfig->profiles() as $profile) {
+            printf(
+                "- %-12s %-12s modules:%d\n",
+                $profile->name(),
+                $profile->environment(),
+                count($profile->modules())
+            );
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigProfileEnv(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config profile env requires <profile>\n");
+            return 1;
+        }
+        if (count($args) > 1) {
+            fwrite(STDERR, "config profile env does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        foreach ($profile->env() as $key => $value) {
+            printf("%s=%s\n", $key, $value);
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigProfileModules(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config profile modules requires <profile>\n");
+            return 1;
+        }
+        if (count($args) > 1) {
+            fwrite(STDERR, "config profile modules does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        foreach ($profile->modules() as $module) {
+            echo $module . PHP_EOL;
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigProfileInfo(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config profile info requires <profile>\n");
+            return 1;
+        }
+        if (count($args) > 1) {
+            fwrite(STDERR, "config profile info does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        $payload = $profile->toArray();
+        echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigProfileRenderEnv(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config profile render-env requires <profile>\n");
+            return 1;
+        }
+
+        $target = $args[1] ?? null;
+        if ($target !== null && (!is_string($target) || $target === '')) {
+            fwrite(STDERR, "Invalid target path\n");
+            return 1;
+        }
+
+        if (count($args) > 2) {
+            fwrite(STDERR, "config profile render-env accepts at most 2 arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        $target = $target ?? ($this->config->workspaceRoot() . '/blackcat-config/var/env/' . $profile->name() . '.env');
+
+        try {
+            $renderer = new \BlackCat\Config\Env\EnvRenderer();
+            $path = $renderer->render($profile, $target);
+            echo "Env file generated: {$path}\n";
+            return 0;
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigIntegrationList(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config integration list requires <profile>\n");
+            return 1;
+        }
+        if (count($args) > 1) {
+            fwrite(STDERR, "config integration list does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        foreach ($profile->integrations() as $name => $path) {
+            printf("%-16s %s\n", $name, $path);
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigIntegrationCheck(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config integration check requires <profile>\n");
+            return 1;
+        }
+        if (count($args) > 1) {
+            fwrite(STDERR, "config integration check does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        $checker = new \BlackCat\Config\Integration\IntegrationChecker();
+        $issues = $checker->check($profile);
+        if ($issues !== []) {
+            foreach ($issues as $issue) {
+                fwrite(STDERR, "- {$issue}\n");
+            }
+            return 1;
+        }
+
+        echo "All integrations resolved for {$profile->name()}.\n";
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigTelemetryTail(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config telemetry tail requires <profile>\n");
+            return 1;
+        }
+
+        $lines = isset($args[1]) ? max(1, (int) $args[1]) : 20;
+        if (count($args) > 2) {
+            fwrite(STDERR, "config telemetry tail accepts at most 2 arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        $defaultTelemetry = (string) ($profileConfig->defaults()['telemetry']['channel'] ?? 'stdout');
+        $emitter = \BlackCat\Config\Telemetry\TelemetryEmitter::forChannel($profile->telemetryChannel($defaultTelemetry));
+        $records = $emitter->tail($lines);
+        foreach ($records as $record) {
+            echo $record . PHP_EOL;
+        }
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigSecurityCheck(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        $profileName = $args[0] ?? null;
+        if (!is_string($profileName) || $profileName === '') {
+            fwrite(STDERR, "config security check requires <profile>\n");
+            return 1;
+        }
+        if (count($args) > 1) {
+            fwrite(STDERR, "config security check does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $profile = $this->requireConfigProfile($profileConfig, $profileName);
+        if ($profile === null) {
+            return 1;
+        }
+
+        $checklist = new \BlackCat\Config\Security\SecurityChecklist();
+        $issues = $checklist->validate($profile);
+        if ($issues !== []) {
+            foreach ($issues as $issue) {
+                fwrite(STDERR, "- {$issue}\n");
+            }
+            return 1;
+        }
+
+        echo "Security checklist passed for {$profile->name()}.\n";
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigSecurityScan(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+
+        $root = (string) (getcwd() ?: '.');
+        [$root, $args, $ok] = $this->consumePathOption($args, $root);
+        if (!$ok) {
+            return 1;
+        }
+        if ($args !== []) {
+            fwrite(STDERR, "config security scan does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $res = \BlackCat\Config\Security\SourceCodePolicyScanner::scan($root);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 1;
+        }
+
+        if ($json) {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        } else {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        }
+
+        return $res['violations'] === [] ? 0 : 2;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigSecurityAttackSurface(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+
+        $root = (string) (getcwd() ?: '.');
+        [$root, $args, $ok] = $this->consumePathOption($args, $root);
+        if (!$ok) {
+            return 1;
+        }
+        if ($args !== []) {
+            fwrite(STDERR, "config security attack-surface does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        try {
+            $res = \BlackCat\Config\Security\AttackSurfaceScanner::scan($root);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 1;
+        }
+
+        if ($json) {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        } else {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        }
+
+        $hasErrors = false;
+        foreach ($res['findings'] as $finding) {
+            if ($finding['severity'] === 'error') {
+                $hasErrors = true;
+                break;
+            }
+        }
+
+        return $hasErrors ? 2 : 0;
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigCheck(array $args): int
+    {
+        [$profilesPath, $args, $ok] = $this->consumeConfigProfilesPath($args);
+        if (!$ok) {
+            return 1;
+        }
+        if ($args !== []) {
+            fwrite(STDERR, "config check does not accept additional arguments\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $profileConfig = $this->loadBlackcatProfileConfigOrFail($profilesPath);
+        if ($profileConfig === null) {
+            return 2;
+        }
+
+        $checklist = new \BlackCat\Config\Security\SecurityChecklist();
+        $integrationChecker = new \BlackCat\Config\Integration\IntegrationChecker();
+
+        $failures = [];
+        foreach ($profileConfig->profiles() as $profile) {
+            $securityIssues = $checklist->validate($profile);
+            $integrationIssues = $integrationChecker->check($profile);
+            if ($securityIssues !== [] || $integrationIssues !== []) {
+                $failures[$profile->name()] = array_merge($securityIssues, $integrationIssues);
+            }
+        }
+
+        if ($failures !== []) {
+            foreach ($failures as $profile => $issues) {
+                fwrite(STDERR, "[{$profile}]\n");
+                foreach ($issues as $issue) {
+                    fwrite(STDERR, "  - {$issue}\n");
+                }
+            }
+            return 1;
+        }
+
+        echo "All profiles passed security + integration checks.\n";
+        return 0;
+    }
+
+    /**
+     * @param string[] $args
+     * @return array{0:?string,1:string[],2:bool}
+     */
+    private function consumeConfigProfilesPath(array $args): array
+    {
+        $filtered = [];
+        $path = null;
+        $expect = false;
+
+        foreach ($args as $arg) {
+            if ($expect) {
+                $expect = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --profiles\n");
+                    return [null, [], false];
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --profiles option\n");
+                    return [null, [], false];
+                }
+                $path = $candidate;
+                continue;
+            }
+
+            if ($arg === '--profiles') {
+                $expect = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--profiles=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --profiles\n");
+                    return [null, [], false];
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --profiles option\n");
+                    return [null, [], false];
+                }
+                $path = $val;
+                continue;
+            }
+
+            $filtered[] = $arg;
+        }
+
+        if ($expect) {
+            fwrite(STDERR, "Missing value for --profiles\n");
+            return [null, [], false];
+        }
+
+        return [$path, $filtered, true];
+    }
+
+    /**
+     * @param string[] $args
+     * @return array{0:string,1:string[],2:bool}
+     */
+    private function consumePathOption(array $args, string $default): array
+    {
+        $filtered = [];
+        $root = $default;
+        $expect = false;
+
+        foreach ($args as $arg) {
+            if ($expect) {
+                $expect = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return [$root, [], false];
+                }
+                $root = $candidate;
+                continue;
+            }
+
+            if ($arg === '--path') {
+                $expect = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--path=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return [$root, [], false];
+                }
+                $root = $val;
+                continue;
+            }
+
+            if ($root === $default && !str_starts_with($arg, '--') && trim((string) $arg) !== '') {
+                $root = (string) $arg;
+                continue;
+            }
+
+            $filtered[] = $arg;
+        }
+
+        if ($expect) {
+            fwrite(STDERR, "Missing value for --path\n");
+            return [$root, [], false];
+        }
+
+        return [$root, $filtered, true];
+    }
+
+    private function loadBlackcatProfileConfigOrFail(?string $profilesPath): ?\BlackCat\Config\Config\ProfileConfig
+    {
+        $path = $profilesPath;
+        if ($path === null) {
+            $candidate = $this->config->workspaceRoot() . '/blackcat-config/config/profiles.php';
+            if (is_file($candidate)) {
+                $path = $candidate;
+            }
+        }
+
+        if ($path === null) {
+            fwrite(STDERR, "No profiles file provided. Use --profiles=... (or place it at blackcat-config/config/profiles.php).\n");
+            return null;
+        }
+
+        try {
+            return \BlackCat\Config\Config\ProfileConfig::fromFile($path);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return null;
+        }
+    }
+
+    private function requireConfigProfile(\BlackCat\Config\Config\ProfileConfig $config, string $name): ?\BlackCat\Config\Profile\ConfigProfile
+    {
+        try {
+            return $config->require($name);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return null;
         }
     }
 
