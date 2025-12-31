@@ -9,12 +9,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout blackcat-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: blackcat-cli
 
       - name: Checkout blackcat-cli-spec (manifest schema/validator)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: blackcatdatabase/blackcat-cli-spec
           path: blackcat-cli-spec

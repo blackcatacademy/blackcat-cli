@@ -2606,6 +2606,12 @@ final class BlackCatCli
             echo "config\n";
             echo "Usage: blackcat config <subcommand> [args...]\n\n";
             echo "Subcommands:\n";
+            echo "  bootstrap                     Auto-init runtime config + run doctor\n";
+            echo "         [--template=NAME]      Seed with template (trust-edgen, trust-edgen-compat)\n";
+            echo "         [--force]              Replace insecure/invalid existing file\n";
+            echo "         [--path=FILE]          Force specific path\n";
+            echo "         [--strict]             Fail on warnings\n";
+            echo "         [--json]               JSON output\n";
             echo "  runtime paths                 Print read/write candidate paths\n";
             echo "  runtime scan                  Scan for first usable runtime config\n";
             echo "  runtime recommend             Recommend best write location\n";
@@ -2633,6 +2639,7 @@ final class BlackCatCli
             echo "  security attack-surface [path]Scan source tree for attack-surface findings\n";
             echo "  check                         Run security+integration checks for all profiles\n";
             echo "\nExamples:\n";
+            echo "  blackcat config bootstrap --template=trust-edgen --force\n";
             echo "  blackcat config runtime recommend\n";
             echo "  blackcat config runtime template trust-edgen --json > /tmp/config.seed.json\n";
             echo "  blackcat config runtime init --template=trust-edgen --force\n";
@@ -2717,6 +2724,7 @@ final class BlackCatCli
         }
 
         return match ($cmd) {
+            'bootstrap' => $this->runConfigBootstrap($rest),
             'runtime paths' => $this->runConfigRuntimePaths($rest),
             'runtime scan' => $this->runConfigRuntimeScan($rest),
             'runtime recommend' => $this->runConfigRuntimeRecommend($rest),
@@ -2738,6 +2746,207 @@ final class BlackCatCli
             'check' => $this->runConfigCheck($rest),
             default => $this->unknown('config ' . $sub),
         };
+    }
+
+    /**
+     * @param string[] $args
+     */
+    private function runConfigBootstrap(array $args): int
+    {
+        [$json, $args] = $this->consumeFlag($args, '--json');
+        [$force, $args] = $this->consumeFlag($args, '--force');
+        [$strict, $args] = $this->consumeFlag($args, '--strict');
+
+        $path = null;
+        $template = null;
+
+        $expectPath = false;
+        $expectTemplate = false;
+
+        foreach ($args as $arg) {
+            if ($expectPath) {
+                $expectPath = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $candidate;
+                continue;
+            }
+
+            if ($expectTemplate) {
+                $expectTemplate = false;
+                $candidate = trim((string) $arg);
+                if ($candidate === '' || $candidate === '1') {
+                    fwrite(STDERR, "Invalid value for --template\n");
+                    return 1;
+                }
+                if ($template !== null) {
+                    fwrite(STDERR, "Duplicate --template option\n");
+                    return 1;
+                }
+                $template = $candidate;
+                continue;
+            }
+
+            if ($arg === '--path' || $arg === '--out') {
+                $expectPath = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--path=') || str_starts_with($arg, '--out=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --path\n");
+                    return 1;
+                }
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate --path option\n");
+                    return 1;
+                }
+                $path = $val;
+                continue;
+            }
+
+            if ($arg === '--template') {
+                $expectTemplate = true;
+                continue;
+            }
+
+            if (str_starts_with($arg, '--template=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    fwrite(STDERR, "Invalid value for --template\n");
+                    return 1;
+                }
+                if ($template !== null) {
+                    fwrite(STDERR, "Duplicate --template option\n");
+                    return 1;
+                }
+                $template = $val;
+                continue;
+            }
+
+            fwrite(STDERR, "config bootstrap does not accept positional arguments\n");
+            return 1;
+        }
+
+        if ($expectPath) {
+            fwrite(STDERR, "Missing value for --path\n");
+            return 1;
+        }
+        if ($expectTemplate) {
+            fwrite(STDERR, "Missing value for --template\n");
+            return 1;
+        }
+
+        if (!$this->ensureBlackcatConfigAvailable()) {
+            return 2;
+        }
+
+        $template ??= 'trust-edgen';
+
+        $payload = [];
+        try {
+            $t = strtolower(trim((string) $template));
+            if ($t === 'trust-edgen') {
+                $payload = \BlackCat\Config\Runtime\Templates\TrustKernelEdgenTemplate::build('full');
+            } elseif ($t === 'trust-edgen-compat') {
+                $payload = \BlackCat\Config\Runtime\Templates\TrustKernelEdgenTemplate::build('root_uri');
+            } elseif ($t === 'none' || $t === 'empty') {
+                $payload = [];
+            } else {
+                throw new \RuntimeException('Unknown bootstrap template: ' . $template);
+            }
+        } catch (\Throwable $e) {
+            if ($json) {
+                echo json_encode(['status' => 'fail', 'message' => $e->getMessage()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                return 2;
+            }
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        try {
+            if ($path !== null && trim($path) !== '') {
+                $init = \BlackCat\Config\Runtime\RuntimeConfigInstaller::init($payload, $path, $force);
+            } else {
+                $init = \BlackCat\Config\Runtime\RuntimeConfigInstaller::initRecommended($payload, $force);
+            }
+        } catch (\Throwable $e) {
+            if ($json) {
+                echo json_encode(['status' => 'fail', 'message' => $e->getMessage()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+                return 2;
+            }
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        $doctor = null;
+        $doctorExit = 0;
+        try {
+            $repo = \BlackCat\Config\Runtime\ConfigRepository::fromJsonFile($init['path']);
+            $doctor = \BlackCat\Config\Runtime\RuntimeDoctor::inspect($repo);
+
+            $errors = (int) $doctor['summary']['errors'];
+            $warnings = (int) $doctor['summary']['warnings'];
+            if ($errors > 0 || ($strict && $warnings > 0)) {
+                $doctorExit = 2;
+            }
+        } catch (\Throwable $e) {
+            $doctor = ['status' => 'fail', 'message' => $e->getMessage()];
+            $doctorExit = 2;
+        }
+
+        if ($json) {
+            echo json_encode([
+                'status' => $doctorExit === 0 ? 'ok' : 'fail',
+                'init' => $init,
+                'doctor' => $doctor,
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            return $doctorExit;
+        }
+
+        echo "Config bootstrap\n";
+        echo "  path:    " . $init['path'] . "\n";
+        echo "  created: " . ($init['created'] ? 'yes' : 'no') . "\n";
+        if ($doctorExit !== 0) {
+            echo "  doctor:  FAIL\n";
+        } else {
+            echo "  doctor:  OK\n";
+        }
+
+        if (is_array($doctor) && isset($doctor['message'])) {
+            echo "\nDoctor error:\n";
+            echo "  " . (string)$doctor['message'] . "\n";
+        } elseif (is_array($doctor) && isset($doctor['findings']) && is_array($doctor['findings'])) {
+            $findings = $doctor['findings'];
+            if ($findings !== []) {
+                echo "\nFindings:\n";
+                foreach ($findings as $finding) {
+                    $sev = (string) $finding['severity'];
+                    $code = (string) $finding['code'];
+                    $msg = (string) $finding['message'];
+                    if ($sev !== '' && $code !== '' && $msg !== '') {
+                        echo "  - [{$sev}] {$code} {$msg}\n";
+                    }
+                }
+            }
+        }
+
+        if ($doctorExit !== 0) {
+            echo "\nNext steps:\n";
+            echo "  - Fix the issues above (paths, permissions, required files)\n";
+            echo "  - Re-run: blackcat config runtime doctor --path=" . $init['path'] . ($strict ? ' --strict' : '') . "\n";
+            echo "  - Then:   blackcat trust verify --config=" . $init['path'] . "\n";
+        }
+
+        return $doctorExit;
     }
 
     /**
