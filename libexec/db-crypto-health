@@ -263,13 +263,11 @@ try {
         throw new RuntimeException('Keys dir not found: ' . $keysDir);
     }
 
-    $env = [
-        'BLACKCAT_KMS_ENDPOINTS' => '[]',
-    ];
-    if (!RuntimeConfig::isInitialized()) {
-        $env['BLACKCAT_KEYS_DIR'] = $keysDir;
-    }
-    $crypto = CryptoManager::boot(CryptoConfig::fromEnv($env));
+    $cryptoCfg = RuntimeConfig::isInitialized()
+        ? CryptoConfig::fromRuntimeConfig()
+        : CryptoConfig::fromArray(['keys_dir' => $keysDir, 'kms' => []]);
+
+    $crypto = CryptoManager::boot($cryptoCfg);
 
     $maxContexts = max(0, optInt($options, 'max-contexts', 25));
     $checkAll = optBool($options, 'check-all', false);

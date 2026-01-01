@@ -430,13 +430,22 @@ try {
     }
 
     // Force local-only KMS for deterministic stress results.
-    $env = [
-        'BLACKCAT_KMS_ENDPOINTS' => '[]',
-    ];
-    if (!RuntimeConfig::isInitialized()) {
-        $env['BLACKCAT_KEYS_DIR'] = $keysDir;
-    }
-    $crypto = CryptoManager::boot(CryptoConfig::fromEnv($env));
+    $baseCfg = RuntimeConfig::isInitialized()
+        ? CryptoConfig::fromRuntimeConfig()
+        : CryptoConfig::fromArray(['keys_dir' => $keysDir]);
+
+    $cryptoCfg = new CryptoConfig(
+        keySources: $baseCfg->keySources(),
+        slots: $baseCfg->slots(),
+        kms: [],
+        rotationPolicies: $baseCfg->rotationPolicies(),
+        aeadDriver: $baseCfg->aeadDriver(),
+        aeadFactory: $baseCfg->aeadFactory(),
+        wrapQueueFactory: $baseCfg->wrapQueueFactory(),
+        manifestPath: $baseCfg->manifestPath(),
+    );
+
+    $crypto = CryptoManager::boot($cryptoCfg);
 
     $nullGateway = new class implements DatabaseGatewayInterface {
         public function insert(string $table, array $payload, array $options = []): mixed { return true; }

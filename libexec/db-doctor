@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use BlackCat\Config\Runtime\Config as RuntimeConfig;
 use BlackCat\Core\Database;
+use BlackCat\Core\Database\DbBootstrap;
 
 require __DIR__ . '/bootstrap.php';
 
@@ -21,7 +22,7 @@ try {
     ensureDatabaseInitialized($options);
 
     if (!Database::isInitialized()) {
-        fwrite(STDERR, "Database not initialized. Provide --bootstrap=FILE, --dsn=..., or runtime config db.dsn.\n");
+        fwrite(STDERR, "Database not initialized. Provide --bootstrap=FILE, configure secrets-agent (db.agent.socket_path), or pass --dsn=... --user=... --password=....\n");
         exit(2);
     }
 
@@ -112,6 +113,15 @@ function ensureDatabaseInitialized(array $options): void
         return;
     }
 
+    if (class_exists(DbBootstrap::class) && RuntimeConfig::isInitialized()) {
+        try {
+            DbBootstrap::initFromSecretsAgentIfNeeded(appName: 'blackcat-cli:db-doctor');
+            return;
+        } catch (\Throwable) {
+            // Fall through to explicit DSN flags.
+        }
+    }
+
     $dsn = resolveDbDsn($options);
     if ($dsn === '') {
         return;
@@ -138,18 +148,6 @@ function resolveDbDsn(array $options): string
         return trim($dsn);
     }
 
-    if (RuntimeConfig::isInitialized()) {
-        $v = RuntimeConfig::get('db.dsn');
-        if (is_string($v) && trim($v) !== '') {
-            return trim($v);
-        }
-    }
-
-    $env = getenv('DB_DSN');
-    if (is_string($env) && trim($env) !== '') {
-        return trim($env);
-    }
-
     return '';
 }
 
@@ -166,18 +164,6 @@ function resolveDbUser(array $options): ?string
         return trim($user);
     }
 
-    if (RuntimeConfig::isInitialized()) {
-        $v = RuntimeConfig::get('db.user');
-        if (is_string($v) && trim($v) !== '') {
-            return trim($v);
-        }
-    }
-
-    $env = getenv('DB_USER');
-    if (is_string($env) && trim($env) !== '') {
-        return trim($env);
-    }
-
     return null;
 }
 
@@ -192,22 +178,6 @@ function resolveDbPassword(array $options): ?string
     }
     if (is_string($pass) && trim($pass) !== '') {
         return trim($pass);
-    }
-
-    if (RuntimeConfig::isInitialized()) {
-        foreach (['db.password', 'db.pass'] as $key) {
-            $v = RuntimeConfig::get($key);
-            if (is_string($v) && trim($v) !== '') {
-                return trim($v);
-            }
-        }
-    }
-
-    foreach (['DB_PASSWORD', 'DB_PASS'] as $key) {
-        $env = getenv($key);
-        if (is_string($env) && trim($env) !== '') {
-            return trim($env);
-        }
     }
 
     return null;

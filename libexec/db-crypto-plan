@@ -73,10 +73,15 @@ try {
         $catalog = $root ? BlackcatDatabaseSchemaCatalog::fromRoot($root) : BlackcatDatabaseSchemaCatalog::fromAutodetectedRoot();
         $schemaSnapshot = $catalog->snapshot(array_keys($map->all()));
     } elseif ($dsn !== '') {
+        $user = $options['user'] ?? null;
+        $pass = $options['pass'] ?? ($options['password'] ?? null);
+        $user = is_string($user) && $user !== '1' && trim($user) !== '' ? trim($user) : null;
+        $pass = is_string($pass) && $pass !== '1' && trim($pass) !== '' ? trim($pass) : null;
+
         Database::init([
             'dsn' => $dsn,
-            'user' => getenv('DB_USER') ?: null,
-            'pass' => getenv('DB_PASSWORD') ?: null,
+            'user' => $user,
+            'pass' => $pass,
         ]);
         $db = Database::getInstance();
         $schemaSnapshot = SchemaSnapshotBuilder::forDatabase($db, $db->dialect(), is_string($dbSchema) && $dbSchema !== '' ? $dbSchema : null)

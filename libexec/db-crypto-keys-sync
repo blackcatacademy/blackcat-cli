@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use BlackCat\Core\Database;
+use BlackCat\Core\Database\DbBootstrap;
 use BlackCat\Config\Runtime\Config as RuntimeConfig;
 use BlackCat\DatabaseCrypto\Ops\CryptoKeysInventorySync;
 
@@ -12,18 +13,16 @@ require __DIR__ . '/bootstrap.php';
  * Sync local `*.key` files into the `crypto_keys` table for audit/rotation planning.
  *
  * Usage:
- *   blackcat db-crypto keys-sync --dsn="mysql:host=127.0.0.1;dbname=blackcat" [--user=...] [--pass=...] [--keys-dir=DIR] [--meta=JSON] [--strict] [--config=/path/to/config.json]
+ *   blackcat db-crypto keys-sync [--config=/path/to/config.json] [--keys-dir=DIR] [--meta=JSON] [--strict]
+ *     [--dsn="mysql:host=127.0.0.1;dbname=blackcat" --user=... --pass=...]
  *
  * Config:
  *   - crypto.keys_dir (recommended)
- *
- * Env fallbacks:
- *   DB_DSN, DB_USER, DB_PASSWORD
  */
 
 function usage(): void
 {
-    fwrite(STDERR, "Usage: blackcat db-crypto keys-sync --dsn=DSN [--user=USER] [--pass=PASS] [--keys-dir=DIR] [--meta=JSON] [--strict] [--config=/path/to/config.json]\n");
+    fwrite(STDERR, "Usage: blackcat db-crypto keys-sync [--config=/path/to/config.json] [--keys-dir=DIR] [--meta=JSON] [--strict] [--dsn=DSN --user=USER --pass=PASS]\n");
     exit(1);
 }
 
@@ -52,13 +51,12 @@ function parse_args(array $args): array
 
 $opts = parse_args(array_slice($argv, 1));
 initRuntimeConfig($opts);
-$dsn = (string)($opts['dsn'] ?? (getenv('DB_DSN') ?: ''));
-if ($dsn === '') {
-    usage();
+$dsn = (string)($opts['dsn'] ?? '');
+if ($dsn === '1') {
+    $dsn = '';
 }
-
-$user = (string)($opts['user'] ?? (getenv('DB_USER') ?: ''));
-$pass = (string)($opts['pass'] ?? (getenv('DB_PASSWORD') ?: ''));
+$user = (string)($opts['user'] ?? '');
+$pass = (string)($opts['pass'] ?? '');
 $keysDir = resolveKeysDir($opts);
 if ($keysDir === '') {
     usage();
@@ -73,12 +71,27 @@ if (!empty($opts['meta'])) {
 }
 
 if (!Database::isInitialized()) {
-    Database::init([
-        'dsn' => $dsn,
-        'user' => $user !== '' ? $user : null,
-        'pass' => $pass !== '' ? $pass : null,
-        'appName' => 'blackcat-dbcrypto-keys-sync',
-    ]);
+    if ($dsn === '' && class_exists(DbBootstrap::class) && RuntimeConfig::isInitialized()) {
+        try {
+            DbBootstrap::initFromSecretsAgentIfNeeded(appName: 'blackcat-cli:db-crypto-keys-sync');
+        } catch (\Throwable) {
+            // Fall through to explicit DSN flags.
+        }
+    }
+
+    if (!Database::isInitialized() && $dsn !== '') {
+        Database::init([
+            'dsn' => $dsn,
+            'user' => $user !== '' ? $user : null,
+            'pass' => $pass !== '' ? $pass : null,
+            'appName' => 'blackcat-cli:db-crypto-keys-sync',
+        ]);
+    }
+}
+
+if (!Database::isInitialized()) {
+    fwrite(STDERR, "DB is not configured. Configure secrets-agent (db.agent.socket_path) or pass --dsn=... --user=... --pass=....\n");
+    exit(2);
 }
 
 $db = Database::getInstance();

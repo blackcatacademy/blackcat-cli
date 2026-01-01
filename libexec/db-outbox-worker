@@ -10,12 +10,13 @@ declare(strict_types=1);
  *
  * DB config sources (priority):
  *   1) --bootstrap=/path/to/bootstrap.php  (calls Database::init)
- *   2) --dsn=... [--user=... --password=...]
- *   3) runtime config JSON: db.dsn, db.user, db.password (pass --config=/path.json)
+ *   2) secrets-agent via runtime config (db.agent.socket_path)
+ *   3) --dsn=... [--user=... --password=...]
  */
 
 use BlackCat\Config\Runtime\Config as RuntimeConfig;
 use BlackCat\Core\Database;
+use BlackCat\Core\Database\DbBootstrap;
 use BlackCat\Core\Messaging\Outbox;
 use BlackCat\Core\Messaging\Sender\OutboxSender;
 use BlackCat\Core\Messaging\Sender\StdoutSender;
@@ -107,7 +108,7 @@ if (function_exists('pcntl_signal')) {
 ensureDatabaseInitialized($opts, $logger);
 
 if (!Database::isInitialized()) {
-    fwrite(STDERR, "Missing DB config. Provide --bootstrap=FILE, --dsn=..., or runtime config db.dsn.\n");
+    fwrite(STDERR, "Missing DB config. Provide --bootstrap=FILE, configure secrets-agent (db.agent.socket_path), or pass --dsn=... --user=... --password=....\n");
     exit(2);
 }
 
@@ -256,6 +257,15 @@ function ensureDatabaseInitialized(array $opts, ?LoggerInterface $logger = null)
         return;
     }
 
+    if (class_exists(DbBootstrap::class) && RuntimeConfig::isInitialized()) {
+        try {
+            DbBootstrap::initFromSecretsAgentIfNeeded($logger, resolveAppName($opts));
+            return;
+        } catch (\Throwable) {
+            // Fall through to explicit DSN flags.
+        }
+    }
+
     $dsn = resolveDbDsn($opts);
     if ($dsn === '') {
         return;
@@ -280,18 +290,6 @@ function resolveDbDsn(array $opts): string
         return trim($dsn);
     }
 
-    if (RuntimeConfig::isInitialized()) {
-        $v = RuntimeConfig::get('db.dsn');
-        if (is_string($v) && trim($v) !== '') {
-            return trim($v);
-        }
-    }
-
-    $env = getenv('DB_DSN');
-    if (is_string($env) && trim($env) !== '') {
-        return trim($env);
-    }
-
     return '';
 }
 
@@ -303,18 +301,6 @@ function resolveDbUser(array $opts): ?string
     $user = $opts['user'] ?? '';
     if (is_string($user) && trim($user) !== '') {
         return trim($user);
-    }
-
-    if (RuntimeConfig::isInitialized()) {
-        $v = RuntimeConfig::get('db.user');
-        if (is_string($v) && trim($v) !== '') {
-            return trim($v);
-        }
-    }
-
-    $env = getenv('DB_USER');
-    if (is_string($env) && trim($env) !== '') {
-        return trim($env);
     }
 
     return null;
@@ -329,22 +315,6 @@ function resolveDbPassword(array $opts): ?string
         $val = $opts[$key] ?? '';
         if (is_string($val) && trim($val) !== '') {
             return trim($val);
-        }
-    }
-
-    if (RuntimeConfig::isInitialized()) {
-        foreach (['db.password', 'db.pass'] as $key) {
-            $v = RuntimeConfig::get($key);
-            if (is_string($v) && trim($v) !== '') {
-                return trim($v);
-            }
-        }
-    }
-
-    foreach (['DB_PASSWORD', 'DB_PASS'] as $key) {
-        $env = getenv($key);
-        if (is_string($env) && trim($env) !== '') {
-            return trim($env);
         }
     }
 

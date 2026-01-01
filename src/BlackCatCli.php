@@ -459,8 +459,8 @@ final class BlackCatCli
             echo "  outbox-worker  Drain outbox table (stdout/webhook)\n";
             echo "\nDB config sources (priority):\n";
             echo "  1) --bootstrap=FILE  (your bootstrap calls Database::init)\n";
-            echo "  2) --dsn=... [--user=... --password=...]\n";
-            echo "  3) runtime config JSON: db.dsn, db.user, db.password (pass --config=FILE)\n";
+            echo "  2) secrets-agent via runtime config (db.agent.socket_path)\n";
+            echo "  3) --dsn=... [--user=... --password=...]\n";
             echo "\nExamples:\n";
             echo "  blackcat db ping --dsn=\"mysql:host=localhost;dbname=app;charset=utf8mb4\"\n";
             echo "  blackcat db explain \"SELECT 1\" --analyze\n";

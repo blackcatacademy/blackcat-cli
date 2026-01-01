@@ -13,6 +13,10 @@ require __DIR__ . '/bootstrap.php';
 
 $source = strtolower((string)($options['source'] ?? ''));
 $dsn = (string)($options['dsn'] ?? '');
+$user = $options['user'] ?? null;
+$pass = $options['pass'] ?? ($options['password'] ?? null);
+$user = is_string($user) && $user !== '1' && trim($user) !== '' ? trim($user) : null;
+$pass = is_string($pass) && $pass !== '1' && trim($pass) !== '' ? trim($pass) : null;
 $pos0 = (string)($positionals[0] ?? '');
 if ($dsn === '' && preg_match('~^(mysql|pgsql|sqlite):~i', $pos0)) {
     $dsn = $pos0;
@@ -51,8 +55,8 @@ try {
     if ($source === 'db') {
         Database::init([
             'dsn' => $dsn,
-            'user' => getenv('DB_USER') ?: null,
-            'pass' => getenv('DB_PASSWORD') ?: null,
+            'user' => $user,
+            'pass' => $pass,
         ]);
         $db = Database::getInstance();
 
