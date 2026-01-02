@@ -27,24 +27,6 @@ final class CommandRegistry
 
     public static function fromWorkspaceRoot(string $workspaceRoot): self
     {
-        $commands = [];
-        $errors = [];
-
-        if (!class_exists(ManifestValidator::class)) {
-            // Optional dependency: attempt to autoload from a sibling workspace repo.
-            // This keeps `blackcat-cli` lightweight while allowing manifest validation in monorepo-style workspaces.
-            $autoload = rtrim($workspaceRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'blackcat-cli-spec' . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'autoload.php';
-            if (is_file($autoload)) {
-                require_once $autoload;
-            }
-        }
-
-        if (!class_exists(ManifestValidator::class)) {
-            return new self([], [
-                new ManifestError('', 'Missing dependency: blackcatdatabase/blackcat-cli-spec (ManifestValidator not found).'),
-            ]);
-        }
-
         $workspaceRoot = rtrim($workspaceRoot, DIRECTORY_SEPARATOR);
 
         $paths = [];
@@ -62,6 +44,34 @@ final class CommandRegistry
         }
         $paths = array_values(array_unique($paths));
         sort($paths);
+
+        // No manifests found: keep CLI usable even without cli-spec.
+        if ($paths === []) {
+            return new self([], []);
+        }
+
+        if (!class_exists(ManifestValidator::class)) {
+            // Optional dependency: attempt to autoload from a sibling workspace repo.
+            // This keeps `blackcat-cli` lightweight while allowing manifest validation in monorepo-style workspaces.
+            $autoload = $workspaceRoot . DIRECTORY_SEPARATOR . 'blackcat-cli-spec' . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'autoload.php';
+            if (is_file($autoload)) {
+                require_once $autoload;
+            }
+        }
+
+        if (!class_exists(ManifestValidator::class)) {
+            $errors = [];
+            foreach ($paths as $manifestPath) {
+                $errors[] = new ManifestError(
+                    $manifestPath,
+                    'Missing dependency: blackcatdatabase/blackcat-cli-spec (ManifestValidator not found).'
+                );
+            }
+            return new self([], $errors);
+        }
+
+        $commands = [];
+        $errors = [];
 
         foreach ($paths as $manifestPath) {
             if (!is_file($manifestPath)) {
