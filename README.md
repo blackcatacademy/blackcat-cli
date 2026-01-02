@@ -1,4 +1,8 @@
+![BlackCat CLI banner](.github/blackcat-cli-banner.png)
+
 # BlackCat CLI
+
+[![CI](https://github.com/blackcatacademy/blackcat-cli/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/blackcatacademy/blackcat-cli/actions/workflows/ci.yml?query=branch%3Amain)
 
 `blackcat-cli` is an **optional** CLI frontend for the BlackCat ecosystem.
 

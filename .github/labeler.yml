@@ -1,0 +1,11 @@
+# .github/labeler.yml
+#
+# Intended for automatic PR labeling (via a GitHub App or an Action).
+
+"src/**": ["area:cli"]
+"libexec/**": ["area:cli"]
+"tests/**": ["area:tests"]
+"docs/**": ["docs"]
+".github/**": ["area:ci"]
+"composer.json": ["area:deps"]
+"composer.lock": ["area:deps"]

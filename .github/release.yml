@@ -1,0 +1,12 @@
+changelog:
+  categories:
+    - title: Features
+      labels: [enhancement, feature]
+    - title: Fixes
+      labels: [bug, fix]
+    - title: Security
+      labels: [security]
+    - title: Docs
+      labels: [docs]
+    - title: Chore & CI
+      labels: [chore, ci]
