@@ -397,10 +397,14 @@ try {
     $outPath = optString($options, 'out');
     if ($outPath !== null) {
         $dir = dirname($outPath);
-        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+        if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
             throw new RuntimeException('Cannot create output directory: ' . $dir);
         }
         file_put_contents($outPath, $json . PHP_EOL);
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            @chmod($dir, 0750);
+            @chmod($outPath, 0600);
+        }
         echo "Health report written to {$outPath}\n";
     } else {
         echo $json . PHP_EOL;

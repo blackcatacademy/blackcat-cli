@@ -28,14 +28,27 @@ final class CliTelemetry
             'pid' => getmypid(),
         ];
 
-        file_put_contents(
-            $this->eventsFile,
-            json_encode($event, JSON_THROW_ON_ERROR) . PHP_EOL,
-            FILE_APPEND
-        );
-
         $this->counters['_total'] = ($this->counters['_total'] ?? 0) + 1;
         $this->counters[$command] = ($this->counters[$command] ?? 0) + 1;
+
+        try {
+            $json = json_encode($event, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            if (!is_string($json)) {
+                return;
+            }
+
+            @file_put_contents(
+                $this->eventsFile,
+                $json . PHP_EOL,
+                FILE_APPEND | LOCK_EX
+            );
+
+            if (DIRECTORY_SEPARATOR !== '\\') {
+                @chmod($this->eventsFile, 0600);
+            }
+        } catch (\Throwable) {
+            // Telemetry must be best-effort; never crash CLI execution.
+        }
     }
 
     public function flush(): void
@@ -57,14 +70,30 @@ final class CliTelemetry
             );
         }
 
-        file_put_contents($this->metricsFile, implode(PHP_EOL, $lines) . PHP_EOL);
+        try {
+            @file_put_contents($this->metricsFile, implode(PHP_EOL, $lines) . PHP_EOL, LOCK_EX);
+            if (DIRECTORY_SEPARATOR !== '\\') {
+                @chmod($this->metricsFile, 0600);
+            }
+        } catch (\Throwable) {
+            // Telemetry must be best-effort; never crash CLI execution.
+        }
     }
 
     private function ensureDirectory(string $file): void
     {
         $dir = dirname($file);
+        if ($dir === '' || $dir === '.' || $dir === DIRECTORY_SEPARATOR) {
+            return;
+        }
         if (!is_dir($dir)) {
-            mkdir($dir, 0777, true);
+            if (!@mkdir($dir, 0750, true) && !is_dir($dir)) {
+                return;
+            }
+
+            if (DIRECTORY_SEPARATOR !== '\\') {
+                @chmod($dir, 0750);
+            }
         }
     }
 }
