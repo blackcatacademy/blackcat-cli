@@ -685,9 +685,14 @@ final class BlackCatCli
             if ($expectValueFor !== null) {
                 $key = $expectValueFor;
                 $expectValueFor = null;
+                $val = trim((string) $arg);
+                if ($val === '' || $val === '1' || str_starts_with($val, '-')) {
+                    fwrite(STDERR, "Missing value for {$key}\n");
+                    return 1;
+                }
                 $this->applyTrustRequestOption(
                     $key,
-                    (string) $arg,
+                    $val,
                     $out,
                     $chainId,
                     $rpcEndpoints,
@@ -890,13 +895,17 @@ final class BlackCatCli
                 $key = $expectValueFor;
                 $expectValueFor = null;
                 $val = trim((string) $arg);
+                if ($val === '' || $val === '1' || str_starts_with($val, '-')) {
+                    fwrite(STDERR, "Missing value for {$key}\n");
+                    return 1;
+                }
 
                 if ($key === '--factory') {
-                    $factory = $val !== '' ? $val : null;
+                    $factory = $val;
                 } elseif ($key === '--out') {
-                    $out = $val !== '' ? $val : null;
+                    $out = $val;
                 } elseif ($key === '--request') {
-                    $requestPath = $val !== '' ? $val : null;
+                    $requestPath = $val;
                 } else {
                     throw new InvalidArgumentException('Unknown option: ' . $key);
                 }
@@ -2614,8 +2623,16 @@ final class BlackCatCli
         }
 
         $dir = dirname($path);
-        if ($dir === '' || $dir === '.' || $dir === DIRECTORY_SEPARATOR) {
-            throw new InvalidArgumentException('Invalid --out path (must not be root).');
+        if ($dir === '.') {
+            $cwd = getcwd();
+            if ($cwd === false) {
+                throw new \RuntimeException('Unable to resolve current directory for --out path.');
+            }
+            $dir = $cwd;
+        }
+
+        if ($dir === DIRECTORY_SEPARATOR) {
+            throw new InvalidArgumentException('Invalid --out path (must not be filesystem root).');
         }
 
         if (!is_dir($dir)) {
