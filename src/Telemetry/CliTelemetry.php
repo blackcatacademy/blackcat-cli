@@ -63,9 +63,10 @@ final class CliTelemetry
         ];
 
         foreach ($this->counters as $command => $count) {
+            $label = self::escapePrometheusLabelValue((string) $command);
             $lines[] = sprintf(
                 'blackcat_cli_command_total{command="%s"} %d',
-                $command,
+                $label,
                 $count
             );
         }
@@ -95,5 +96,14 @@ final class CliTelemetry
                 @chmod($dir, 0750);
             }
         }
+    }
+
+    private static function escapePrometheusLabelValue(string $value): string
+    {
+        $value = str_replace('\\', '\\\\', $value);
+        $value = str_replace("\n", '\\n', $value);
+        $value = str_replace("\r", '\\r', $value);
+        $value = str_replace("\t", '\\t', $value);
+        return str_replace('"', '\\"', $value);
     }
 }

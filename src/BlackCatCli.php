@@ -171,13 +171,14 @@ final class BlackCatCli
         $spec = $this->config->command($command);
 
         try {
+            $runner = $this->assertAllowedRunner($command, $spec['runner']);
             $script = $this->assertAllowedScript($command, $spec['script']);
         } catch (InvalidArgumentException $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             return 2;
         }
 
-        $cmd = array_merge([$spec['runner'], $script], $spec['args'], [$shoppingList]);
+        $cmd = array_merge([$runner, $script], $spec['args'], [$shoppingList]);
         return $this->runProcess($cmd);
     }
 
@@ -189,13 +190,14 @@ final class BlackCatCli
         try {
             $spec = $this->config->command($command);
             try {
+                $runner = $this->assertAllowedRunner($command, $spec['runner']);
                 $script = $this->assertAllowedScript($command, $spec['script']);
             } catch (InvalidArgumentException $e) {
                 fwrite(STDERR, $e->getMessage() . PHP_EOL);
                 return 2;
             }
 
-            $cmd = array_merge([$spec['runner'], $script], $spec['args'], $args);
+            $cmd = array_merge([$runner, $script], $spec['args'], $args);
             return $this->runProcess($cmd);
         } catch (InvalidArgumentException) {
             // fall through
@@ -211,6 +213,12 @@ final class BlackCatCli
         }
 
         $runner = $dynamic->runner() ?? 'php';
+        try {
+            $runner = $this->assertAllowedRunner($command, $runner);
+        } catch (InvalidArgumentException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
         $script = $dynamic->script();
         if (!is_string($script) || $script === '') {
             fwrite(STDERR, "Invalid proxy spec for '{$command}': missing script.\n");
@@ -226,6 +234,26 @@ final class BlackCatCli
 
         $cmd = array_merge([$runner, $script], $dynamic->args(), $args);
         return $this->runProcess($cmd);
+    }
+
+    private function assertAllowedRunner(string $command, string $runner): string
+    {
+        $runner = trim($runner);
+        if ($runner === '' || str_contains($runner, "\0")) {
+            throw new InvalidArgumentException("Command '{$command}' has an invalid runner.");
+        }
+
+        if (str_starts_with($runner, '-')) {
+            throw new InvalidArgumentException("Command '{$command}' runner must not start with '-'.");
+        }
+
+        if (preg_match('/\\s/', $runner) === 1 && !is_file($runner)) {
+            throw new InvalidArgumentException(
+                "Command '{$command}' runner contains whitespace but is not an executable file path; pass runner args via the command args array instead."
+            );
+        }
+
+        return $runner;
     }
 
     private function assertAllowedScript(string $command, string $script): string
@@ -2633,6 +2661,12 @@ final class BlackCatCli
 
         if ($dir === DIRECTORY_SEPARATOR) {
             throw new InvalidArgumentException('Invalid --out path (must not be filesystem root).');
+        }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $trimmed = rtrim($dir, "\\/");
+            if (preg_match('/^[A-Za-z]:$/', $trimmed) === 1) {
+                throw new InvalidArgumentException('Invalid --out path (must not be filesystem root).');
+            }
         }
 
         if (!is_dir($dir)) {
