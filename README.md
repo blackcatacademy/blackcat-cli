@@ -63,6 +63,8 @@ $install = $config->command('install');
 
 ## Tests
 
+Note: PHPUnit tests expect `blackcat-cli-spec` and `blackcat-config` to be present as sibling directories in the workspace (as in `blackcatacademy`).
+
 ```bash
 bash tests/test.cli
 php vendor/bin/phpunit

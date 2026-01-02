@@ -20,6 +20,13 @@ jobs:
           path: blackcat-cli-spec
           token: ${{ secrets.BLACKCAT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Checkout blackcat-config (runtime config + hardening)
+        uses: actions/checkout@v6
+        with:
+          repository: blackcatacademy/blackcat-config
+          path: blackcat-config
+          token: ${{ secrets.BLACKCAT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
