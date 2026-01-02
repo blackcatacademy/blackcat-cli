@@ -161,6 +161,10 @@ function parseArgs(array $args): array
  */
 function initRuntimeConfig(array $options): void
 {
+    if (!class_exists(RuntimeConfig::class)) {
+        return;
+    }
+
     $cfg = $options['config'] ?? ($options['config-file'] ?? null);
     if ($cfg === '1') {
         $cfg = '';
@@ -203,7 +207,7 @@ function ensureDatabaseInitialized(array $options): void
         return;
     }
 
-    if (class_exists(DbBootstrap::class) && RuntimeConfig::isInitialized()) {
+    if (class_exists(DbBootstrap::class) && class_exists(RuntimeConfig::class) && RuntimeConfig::isInitialized()) {
         try {
             DbBootstrap::initFromSecretsAgentIfNeeded(appName: 'blackcat-cli:db');
             return;
