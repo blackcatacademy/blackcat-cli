@@ -3380,7 +3380,11 @@ final class BlackCatCli
                 }
             }
 
-            $res = \BlackCat\Config\Runtime\RuntimeConfigInstaller::init($payload, $path, $force);
+            if ($path !== null && trim($path) !== '') {
+                $res = \BlackCat\Config\Runtime\RuntimeConfigInstaller::init($payload, $path, $force);
+            } else {
+                $res = \BlackCat\Config\Runtime\RuntimeConfigInstaller::initRecommended($payload, $force);
+            }
         } catch (\Throwable $e) {
             fwrite(STDERR, $e->getMessage() . PHP_EOL);
             return 2;
