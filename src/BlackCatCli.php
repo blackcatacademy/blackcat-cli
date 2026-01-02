@@ -13,6 +13,8 @@ use InvalidArgumentException;
 
 final class BlackCatCli
 {
+    private const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024; // 1 MiB
+
     private const ABI_SELECTOR_CREATE_INSTANCE = '81ff2930';
     private const ABI_SELECTOR_PAUSED = '5c975abb';
     private const ABI_SELECTOR_ACTIVE_ROOT = 'abb2efdf';
@@ -2036,10 +2038,85 @@ final class BlackCatCli
      */
     private function httpPostJson(string $url, array $payload, float $timeoutSeconds): array
     {
+        $url = trim($url);
+        if ($url === '' || str_contains($url, "\0")) {
+            throw new \RuntimeException('Invalid JSON-RPC URL.');
+        }
+
+        // Fail-closed TLS hardening + SSRF hardening:
+        // - require https except loopback (localhost dev nodes),
+        // - reject private/reserved IP literals except loopback,
+        // - reject IPv6 zone identifiers (RFC 6874) to avoid link-local/ULA bypasses,
+        // - reject user/pass in URLs to avoid credential leaks.
+        $parts = parse_url($url);
+        if (!is_array($parts)) {
+            throw new \RuntimeException('Invalid JSON-RPC URL (parse_url failed).');
+        }
+
+        $scheme = $parts['scheme'] ?? null;
+        $host = $parts['host'] ?? null;
+        $user = $parts['user'] ?? null;
+        $pass = $parts['pass'] ?? null;
+        $port = $parts['port'] ?? null;
+
+        if (!is_string($scheme) || trim($scheme) === '') {
+            throw new \RuntimeException('JSON-RPC URL must include a scheme.');
+        }
+        $scheme = strtolower(trim($scheme));
+        if (!in_array($scheme, ['http', 'https'], true)) {
+            throw new \RuntimeException('Unsupported JSON-RPC URL scheme: ' . $scheme);
+        }
+
+        if (!is_string($host) || trim($host) === '') {
+            throw new \RuntimeException('JSON-RPC URL must include a host.');
+        }
+        $host = strtolower(trim($host));
+
+        if (str_contains($host, '%')) {
+            $base = explode('%', $host, 2)[0] ?? '';
+            if (is_string($base) && $base !== '' && filter_var($base, FILTER_VALIDATE_IP) !== false) {
+                throw new \RuntimeException('JSON-RPC URL host must not include an IPv6 zone identifier.');
+            }
+            throw new \RuntimeException('Invalid JSON-RPC URL host.');
+        }
+
+        if (is_string($user) || is_string($pass)) {
+            throw new \RuntimeException('JSON-RPC URL must not include username/password.');
+        }
+
+        // parse_url() already constrains numeric ports to 1..65535, but keep a defensive floor check.
+        if ($port !== null && (!is_int($port) || $port < 1)) {
+            throw new \RuntimeException('Invalid JSON-RPC URL port.');
+        }
+
+        $isLoopback = $host === 'localhost' || $host === '127.0.0.1' || $host === '::1';
+        if ($scheme === 'http' && !$isLoopback) {
+            throw new \RuntimeException('JSON-RPC URL must use https (http is allowed only for loopback).');
+        }
+
+        if (filter_var($host, FILTER_VALIDATE_IP) !== false && !$isLoopback) {
+            $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+            if (filter_var($host, FILTER_VALIDATE_IP, $flags) === false) {
+                throw new \RuntimeException('JSON-RPC URL host must not be a private/reserved IP address.');
+            }
+        }
+
         $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
         if (!is_string($json)) {
             throw new \RuntimeException('Unable to encode JSON-RPC payload.');
         }
+
+        $timeoutSeconds = max(1.0, $timeoutSeconds);
+
+        $ssl = [
+            // Fail closed: do NOT allow bypassing TLS verification via global php.ini / stream defaults.
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+            'allow_self_signed' => false,
+            'SNI_enabled' => true,
+            'disable_compression' => true,
+        ];
+        $ssl['peer_name'] = $host;
 
         $ctx = stream_context_create([
             'http' => [
@@ -2048,14 +2125,16 @@ final class BlackCatCli
                 'ignore_errors' => true,
                 'follow_location' => 0,
                 'max_redirects' => 0,
-                'header' => "User-Agent: blackcat-cli\r\nContent-Type: application/json\r\n",
+                'header' => "User-Agent: blackcat-cli\r\nContent-Type: application/json\r\nAccept: application/json\r\n",
                 'content' => $json,
             ],
+            'ssl' => $ssl,
         ]);
 
         /** @var list<string> $http_response_header */
         $http_response_header = [];
-        $body = @file_get_contents($url, false, $ctx);
+        $maxBytes = self::MAX_HTTP_RESPONSE_BYTES;
+        $body = @file_get_contents($url, false, $ctx, 0, $maxBytes + 1);
         $headers = $http_response_header;
         $status = 0;
         if ($headers !== []) {
@@ -2067,6 +2146,9 @@ final class BlackCatCli
 
         if ($body === false) {
             throw new \RuntimeException('HTTP request failed: ' . $url);
+        }
+        if (strlen($body) > $maxBytes) {
+            throw new \RuntimeException('HTTP response too large (possible malicious endpoint or MITM).');
         }
 
         return [
@@ -4815,6 +4897,32 @@ final class BlackCatCli
      */
     private function httpGet(string $url, float $timeoutSeconds): array
     {
+        $url = trim($url);
+        if ($url === '' || str_contains($url, "\0")) {
+            throw new \RuntimeException('Invalid HTTP URL.');
+        }
+
+        $parts = parse_url($url);
+        if (!is_array($parts)) {
+            throw new \RuntimeException('Invalid HTTP URL (parse_url failed).');
+        }
+
+        $host = $parts['host'] ?? null;
+        $host = is_string($host) && trim($host) !== '' ? strtolower(trim($host)) : null;
+
+        $timeoutSeconds = max(1.0, $timeoutSeconds);
+
+        $ssl = [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+            'allow_self_signed' => false,
+            'SNI_enabled' => true,
+            'disable_compression' => true,
+        ];
+        if ($host !== null) {
+            $ssl['peer_name'] = $host;
+        }
+
         $ctx = stream_context_create([
             'http' => [
                 'method' => 'GET',
@@ -4824,11 +4932,13 @@ final class BlackCatCli
                 'max_redirects' => 0,
                 'header' => "User-Agent: blackcat-cli\r\n",
             ],
+            'ssl' => $ssl,
         ]);
 
         /** @var list<string> $http_response_header */
         $http_response_header = [];
-        $body = @file_get_contents($url, false, $ctx);
+        $maxBytes = self::MAX_HTTP_RESPONSE_BYTES;
+        $body = @file_get_contents($url, false, $ctx, 0, $maxBytes + 1);
         $headers = $http_response_header;
         $status = 0;
         if ($headers !== []) {
@@ -4840,6 +4950,9 @@ final class BlackCatCli
 
         if ($body === false) {
             throw new \RuntimeException('HTTP request failed: ' . $url);
+        }
+        if (strlen($body) > $maxBytes) {
+            throw new \RuntimeException('HTTP response too large.');
         }
 
         return [
