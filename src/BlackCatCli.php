@@ -169,7 +169,15 @@ final class BlackCatCli
         }
 
         $spec = $this->config->command($command);
-        $cmd = array_merge([$spec['runner'], $spec['script']], $spec['args'], [$shoppingList]);
+
+        try {
+            $script = $this->assertAllowedScript($command, $spec['script']);
+        } catch (InvalidArgumentException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
+        $cmd = array_merge([$spec['runner'], $script], $spec['args'], [$shoppingList]);
         return $this->runProcess($cmd);
     }
 
@@ -180,7 +188,14 @@ final class BlackCatCli
     {
         try {
             $spec = $this->config->command($command);
-            $cmd = array_merge([$spec['runner'], $spec['script']], $spec['args'], $args);
+            try {
+                $script = $this->assertAllowedScript($command, $spec['script']);
+            } catch (InvalidArgumentException $e) {
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+                return 2;
+            }
+
+            $cmd = array_merge([$spec['runner'], $script], $spec['args'], $args);
             return $this->runProcess($cmd);
         } catch (InvalidArgumentException) {
             // fall through
@@ -202,8 +217,40 @@ final class BlackCatCli
             return 1;
         }
 
+        try {
+            $script = $this->assertAllowedScript($command, $script);
+        } catch (InvalidArgumentException $e) {
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            return 2;
+        }
+
         $cmd = array_merge([$runner, $script], $dynamic->args(), $args);
         return $this->runProcess($cmd);
+    }
+
+    private function assertAllowedScript(string $command, string $script): string
+    {
+        $script = trim($script);
+        if ($script === '') {
+            throw new InvalidArgumentException("Command '{$command}' has an empty script path.");
+        }
+
+        if (str_starts_with($script, '-')) {
+            throw new InvalidArgumentException("Command '{$command}' script path must not start with '-'.");
+        }
+
+        $resolved = realpath($script);
+        if ($resolved === false || !is_file($resolved)) {
+            throw new InvalidArgumentException("Command '{$command}' script not found: {$script}");
+        }
+
+        foreach ($this->config->allowedRoots() as $root) {
+            if ($root !== '' && str_starts_with($resolved, $root)) {
+                return $resolved;
+            }
+        }
+
+        throw new InvalidArgumentException("Command '{$command}' script is outside allowed_roots: {$resolved}");
     }
 
     /**
