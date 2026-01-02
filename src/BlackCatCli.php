@@ -259,7 +259,10 @@ final class BlackCatCli
     private function runStatus(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
-        $remaining = self::stripRuntimeConfigArgs($remaining);
+        [$remaining, $ok] = self::stripRuntimeConfigArgs($remaining);
+        if (!$ok) {
+            return 1;
+        }
         if ($remaining !== []) {
             fwrite(STDERR, 'status does not accept additional arguments' . PHP_EOL);
             return 1;
@@ -296,7 +299,10 @@ final class BlackCatCli
     private function runVerify(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
-        [$runtimeConfigPath, $remaining] = self::consumeRuntimeConfigPath($remaining);
+        [$runtimeConfigPath, $remaining, $ok] = self::consumeRuntimeConfigPath($remaining);
+        if (!$ok) {
+            return 1;
+        }
         if ($remaining !== []) {
             fwrite(STDERR, 'verify does not accept additional arguments' . PHP_EOL);
             return 1;
@@ -1117,7 +1123,10 @@ final class BlackCatCli
     private function runTrustTxControllerSetAttestation(array $args): int
     {
         [$json, $args] = $this->consumeFlag($args, '--json');
-        [$runtimeConfigPath, $args] = self::consumeRuntimeConfigPath($args);
+        [$runtimeConfigPath, $args, $ok] = self::consumeRuntimeConfigPath($args);
+        if (!$ok) {
+            return 1;
+        }
 
         $out = null;
         $chainId = null;
@@ -1233,7 +1242,10 @@ final class BlackCatCli
     private function runTrustTxControllerLockAttestation(array $args): int
     {
         [$json, $args] = $this->consumeFlag($args, '--json');
-        [$runtimeConfigPath, $args] = self::consumeRuntimeConfigPath($args);
+        [$runtimeConfigPath, $args, $ok] = self::consumeRuntimeConfigPath($args);
+        if (!$ok) {
+            return 1;
+        }
 
         $out = null;
         $chainId = null;
@@ -1342,7 +1354,10 @@ final class BlackCatCli
     private function runTrustTxControllerAttestRuntimeConfig(array $args): int
     {
         [$json, $args] = $this->consumeFlag($args, '--json');
-        [$runtimeConfigPath, $args] = self::consumeRuntimeConfigPath($args);
+        [$runtimeConfigPath, $args, $ok] = self::consumeRuntimeConfigPath($args);
+        if (!$ok) {
+            return 1;
+        }
 
         $out = null;
         $chainId = null;
@@ -1554,7 +1569,10 @@ final class BlackCatCli
     private function runTrustStatus(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
-        [$runtimeConfigPath, $remaining] = self::consumeRuntimeConfigPath($remaining);
+        [$runtimeConfigPath, $remaining, $ok] = self::consumeRuntimeConfigPath($remaining);
+        if (!$ok) {
+            return 1;
+        }
         if ($remaining !== []) {
             fwrite(STDERR, "trust status does not accept additional arguments\n");
             return 1;
@@ -1650,7 +1668,10 @@ final class BlackCatCli
     private function runTrustVerify(array $args): int
     {
         [$json, $remaining] = $this->consumeFlag($args, '--json');
-        [$runtimeConfigPath, $remaining] = self::consumeRuntimeConfigPath($remaining);
+        [$runtimeConfigPath, $remaining, $ok] = self::consumeRuntimeConfigPath($remaining);
+        if (!$ok) {
+            return 1;
+        }
         if ($remaining !== []) {
             fwrite(STDERR, "trust verify does not accept additional arguments\n");
             return 1;
@@ -4541,77 +4562,117 @@ final class BlackCatCli
 
     /**
      * @param string[] $args
-     * @return string[]
+     * @return array{0:string[],1:bool}
      */
     private static function stripRuntimeConfigArgs(array $args): array
     {
         $filtered = [];
-        $skipNext = false;
+        $expect = false;
+        $expectFlag = null;
 
         foreach ($args as $arg) {
-            if ($skipNext) {
-                $skipNext = false;
+            if ($expect) {
+                $expect = false;
+                $candidate = trim((string) $arg);
+
+                if ($candidate === '' || $candidate === '1' || str_starts_with($candidate, '-')) {
+                    fwrite(STDERR, "Missing value for {$expectFlag}\n");
+                    return [[], false];
+                }
+
+                $expectFlag = null;
                 continue;
             }
 
             if ($arg === '--config' || $arg === '--config-file') {
-                $skipNext = true;
+                $expect = true;
+                $expectFlag = $arg;
                 continue;
             }
 
             if (str_starts_with($arg, '--config=') || str_starts_with($arg, '--config-file=')) {
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    $flag = str_starts_with($arg, '--config-file=') ? '--config-file' : '--config';
+                    fwrite(STDERR, "Missing value for {$flag}\n");
+                    return [[], false];
+                }
                 continue;
             }
 
             $filtered[] = $arg;
         }
 
-        return $filtered;
+        if ($expect) {
+            fwrite(STDERR, "Missing value for {$expectFlag}\n");
+            return [[], false];
+        }
+
+        return [$filtered, true];
     }
 
     /**
      * @param string[] $args
-     * @return array{0:?string,1:string[]}
+     * @return array{0:?string,1:string[],2:bool}
      */
     private static function consumeRuntimeConfigPath(array $args): array
     {
         $filtered = [];
         $path = null;
-        $skipNext = false;
+        $expect = false;
+        $expectFlag = null;
 
         foreach ($args as $arg) {
-            if ($skipNext) {
-                $skipNext = false;
-                if ($path === null && $arg !== '') {
-                    $path = $arg;
+            if ($expect) {
+                $expect = false;
+                $candidate = trim((string) $arg);
+
+                if ($candidate === '' || $candidate === '1' || str_starts_with($candidate, '-')) {
+                    fwrite(STDERR, "Missing value for {$expectFlag}\n");
+                    return [null, [], false];
                 }
+
+                if ($path !== null) {
+                    fwrite(STDERR, "Duplicate {$expectFlag} option\n");
+                    return [null, [], false];
+                }
+
+                $path = $candidate;
+                $expectFlag = null;
                 continue;
             }
 
             if ($arg === '--config' || $arg === '--config-file') {
-                $skipNext = true;
+                $expect = true;
+                $expectFlag = $arg;
                 continue;
             }
 
             if (str_starts_with($arg, '--config=') || str_starts_with($arg, '--config-file=')) {
-                $val = explode('=', $arg, 2)[1] ?? '';
-                if ($path === null && $val !== '') {
-                    $path = $val;
+                $val = trim((string) (explode('=', $arg, 2)[1] ?? ''));
+                if ($val === '' || $val === '1') {
+                    $flag = str_starts_with($arg, '--config-file=') ? '--config-file' : '--config';
+                    fwrite(STDERR, "Missing value for {$flag}\n");
+                    return [null, [], false];
                 }
+                if ($path !== null) {
+                    $flag = str_starts_with($arg, '--config-file=') ? '--config-file' : '--config';
+                    fwrite(STDERR, "Duplicate {$flag} option\n");
+                    return [null, [], false];
+                }
+                $path = $val;
                 continue;
             }
 
             $filtered[] = $arg;
         }
 
-        if ($path !== null) {
-            $path = trim($path);
-            if ($path === '' || $path === '1') {
-                $path = null;
-            }
+        if ($expect) {
+            fwrite(STDERR, "Missing value for {$expectFlag}\n");
+            return [null, [], false];
         }
 
-        return [$path, $filtered];
+        return [$path, $filtered, true];
     }
 
     /**
