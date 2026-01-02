@@ -2046,6 +2046,8 @@ final class BlackCatCli
                 'method' => 'POST',
                 'timeout' => $timeoutSeconds,
                 'ignore_errors' => true,
+                'follow_location' => 0,
+                'max_redirects' => 0,
                 'header' => "User-Agent: blackcat-cli\r\nContent-Type: application/json\r\n",
                 'content' => $json,
             ],
@@ -4818,6 +4820,8 @@ final class BlackCatCli
                 'method' => 'GET',
                 'timeout' => $timeoutSeconds,
                 'ignore_errors' => true,
+                'follow_location' => 0,
+                'max_redirects' => 0,
                 'header' => "User-Agent: blackcat-cli\r\n",
             ],
         ]);
