@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a bug in BlackCat CLI
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security note:
+        - **Do not** post private keys, seed phrases, or wallet exports.
+        - If you believe this is a security issue, follow `SECURITY.md` instead of filing a public issue.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and the expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: 1) … 2) … 3) …
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command used
+      description: Paste the command you ran (redact secrets).
+      render: shell
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output / logs
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions / environment
+      description: Include OS, PHP version, and the repo commit/tag.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context

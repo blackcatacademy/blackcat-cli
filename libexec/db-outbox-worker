@@ -1,0 +1,562 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+/**
+ * BlackCat Outbox Worker (CLI).
+ *
+ * Usage:
+ *   blackcat db outbox-worker --batch=200 --sleep-ms=500 --max-runtime=300 --once
+ *
+ * DB config sources (priority):
+ *   1) --bootstrap=/path/to/bootstrap.php  (calls Database::init)
+ *   2) secrets-agent via runtime config (db.agent.socket_path)
+ *   3) --dsn=... [--user=... --password=...]
+ *
+ * Outbox config sources (priority):
+ *   1) CLI flags (--table/--sender/--webhook-*)
+ *   2) runtime config (db.outbox.*)
+ *   3) env (OUTBOX_*) only when --allow-env is explicitly enabled (demo/test)
+ */
+
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+use BlackCat\Core\Database;
+use BlackCat\Core\Database\DbBootstrap;
+use BlackCat\Core\Messaging\Outbox;
+use BlackCat\Core\Messaging\Sender\OutboxSender;
+use BlackCat\Core\Messaging\Sender\StdoutSender;
+use BlackCat\Core\Messaging\Sender\WebhookSender;
+use Psr\Log\LogLevel;
+
+require __DIR__ . '/bootstrap.php';
+
+// Provide a lightweight PSR-3 fallback when psr/log is absent (e.g., standalone installs)
+if (!interface_exists(LoggerInterface::class)) {
+    if (interface_exists(\Psr\Log\LoggerInterface::class)) {
+        class_alias(\Psr\Log\LoggerInterface::class, LoggerInterface::class);
+    } else {
+        interface LoggerInterface
+        {
+            public function log($level, $message, array $context = []);
+        }
+    }
+}
+
+class CliLogger implements LoggerInterface
+{
+    public function __construct(private bool $verbose = false) {}
+
+    public function log($level, $message, array $context = []): void
+    {
+        if (
+            !$this->verbose
+            && in_array($level, [LogLevel::DEBUG ?? 'debug', 'debug'], true)
+        ) {
+            return;
+        }
+        $row = [
+            'ts' => date('c'),
+            'lvl' => strtoupper((string) $level),
+            'msg' => $message,
+            'ctx' => $context,
+        ];
+        fwrite(STDERR, json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL);
+    }
+
+    public function __call($name, $args)
+    {
+        $this->log($name, $args[0] ?? '', $args[1] ?? []);
+    }
+}
+
+$opts = getopt('', [
+    'config::', 'config-file::', 'bootstrap::',
+    'dsn::', 'user::', 'pass::', 'password::', 'app-name::',
+    'statement-timeout-ms::',
+    'batch::', 'sleep-ms::', 'max-runtime::', 'idle-exit::', 'max-errors::',
+    'health-file::', 'pid-file::', 'once', 'verbose', 'table::',
+    'sender::', 'webhook-url::', 'webhook-auth::', 'webhook-timeout::',
+    'allow-env',
+]);
+
+initRuntimeConfig($opts);
+requireBootstrapIfProvided($opts);
+
+$batch = max(1, (int) ($opts['batch'] ?? 100));
+$sleepMs = max(0, (int) ($opts['sleep-ms'] ?? 500));
+$maxRuntime = max(0, (int) ($opts['max-runtime'] ?? 0));   // 0 = unlimited
+$idleExit = max(0, (int) ($opts['idle-exit'] ?? 0));     // 0 = unlimited
+$maxErrors = max(0, (int) ($opts['max-errors'] ?? 50));
+$healthFile = $opts['health-file'] ?? null;
+$pidFile = $opts['pid-file'] ?? null;
+$once = array_key_exists('once', $opts);
+$verbose = array_key_exists('verbose', $opts);
+$allowEnv = array_key_exists('allow-env', $opts);
+$table = resolveOutboxTable($opts, $allowEnv);
+
+$logger = new CliLogger($verbose);
+
+if (is_string($pidFile) && $pidFile !== '') {
+    file_put_contents($pidFile, (string) getmypid());
+}
+
+$running = true;
+if (function_exists('pcntl_signal')) {
+    pcntl_async_signals(true);
+    $handler = function (int $sig) use (&$running, $logger) {
+        $logger->log('info', 'signal', ['sig' => $sig, 'action' => 'graceful-stop']);
+        $running = false;
+    };
+    pcntl_signal(SIGTERM, $handler);
+    pcntl_signal(SIGINT, $handler);
+    if (defined('SIGQUIT')) {
+        pcntl_signal(SIGQUIT, $handler);
+    }
+}
+
+ensureDatabaseInitialized($opts, $logger);
+
+if (!Database::isInitialized()) {
+    fwrite(STDERR, "Missing DB config. Provide --bootstrap=FILE, configure secrets-agent (db.agent.socket_path), or pass --dsn=... --user=... --password=....\n");
+    exit(2);
+}
+
+$db = Database::getInstance();
+
+$senderType = resolveOutboxSender($opts, $allowEnv);
+
+/** @var OutboxSender $sender */
+switch ($senderType) {
+    case 'webhook':
+        $url = resolveOutboxWebhookUrl($opts, $allowEnv);
+        if ($url === '') {
+            $logger->log('error', 'Webhook sender selected but URL is missing. Use --webhook-url or set db.outbox.webhook.url in runtime config.');
+            exit(2);
+        }
+        $sender = new WebhookSender(
+            url: $url,
+            authBearer: resolveOutboxWebhookAuth($opts, $allowEnv),
+            timeoutSec: resolveOutboxWebhookTimeoutSec($opts, $allowEnv),
+            decodePayload: true
+        );
+        break;
+
+    case 'stdout':
+    default:
+        $sender = new StdoutSender(decodePayload: true);
+        break;
+}
+
+$outbox = new Outbox($db, $logger, $table);
+
+$startedAt = time();
+$lastWork = time();
+$emptyStreak = 0;
+$errorStreak = 0;
+
+$touch = function () use ($healthFile) {
+    if (is_string($healthFile) && $healthFile !== '') {
+        @touch($healthFile);
+    }
+};
+
+$cleanup = function () use ($pidFile) {
+    if (is_string($pidFile) && $pidFile !== '' && file_exists($pidFile)) {
+        @unlink($pidFile);
+    }
+};
+
+$logger->log('info', 'outbox-worker-start', [
+    'table' => $table,
+    'sender' => $senderType,
+    'batch' => $batch,
+    'sleepMs' => $sleepMs,
+    'maxRuntime' => $maxRuntime,
+    'idleExit' => $idleExit,
+]);
+
+try {
+    do {
+        $touch();
+
+        if ($maxRuntime > 0 && (time() - $startedAt) >= $maxRuntime) {
+            $logger->log('info', 'max-runtime-reached');
+            break;
+        }
+
+        if ($idleExit > 0 && (time() - $lastWork) >= $idleExit) {
+            $logger->log('info', 'idle-exit', ['idleSec' => time() - $lastWork]);
+            break;
+        }
+
+        try {
+            $sent = $outbox->flush(fn (array $row) => $sender->send($row), $batch);
+
+            if ($sent > 0) {
+                $logger->log('info', 'flush-ok', ['sent' => $sent]);
+                $lastWork = time();
+                $emptyStreak = 0;
+                $errorStreak = 0;
+                usleep(20_000);
+            } else {
+                $emptyStreak++;
+                if ($once) {
+                    break;
+                }
+                $delay = min(5000, max($sleepMs, (int) floor(pow(2, min($emptyStreak, 8)))));
+                $delay += random_int(0, (int) floor($delay * 0.25));
+                usleep($delay * 1000);
+            }
+        } catch (\Throwable $e) {
+            $errorStreak++;
+            $logger->log('error', 'flush-error', [
+                'e' => $e->getMessage(),
+                'trace' => substr($e->getTraceAsString(), 0, 2000),
+            ]);
+            if ($errorStreak >= $maxErrors) {
+                $logger->log('error', 'too-many-errors', ['count' => $errorStreak]);
+                break;
+            }
+            usleep(250_000);
+        }
+    } while ($running);
+} finally {
+    $cleanup();
+    $logger->log('info', 'outbox-worker-stop');
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function initRuntimeConfig(array $opts): void
+{
+    $cfg = $opts['config'] ?? ($opts['config-file'] ?? null);
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function requireBootstrapIfProvided(array $opts): void
+{
+    $bootstrap = $opts['bootstrap'] ?? null;
+    if (!is_string($bootstrap) || trim($bootstrap) === '') {
+        return;
+    }
+
+    $path = trim($bootstrap);
+    if (!is_file($path)) {
+        throw new RuntimeException('Bootstrap file not found: ' . $path);
+    }
+
+    require $path;
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function ensureDatabaseInitialized(array $opts, ?LoggerInterface $logger = null): void
+{
+    if (Database::isInitialized()) {
+        return;
+    }
+
+    if (class_exists(DbBootstrap::class) && RuntimeConfig::isInitialized()) {
+        try {
+            DbBootstrap::initFromSecretsAgentIfNeeded($logger, resolveAppName($opts));
+            applyStatementTimeoutIfConfigured($opts, $logger);
+            return;
+        } catch (\Throwable) {
+            // Fall through to explicit DSN flags.
+        }
+    }
+
+    $dsn = resolveDbDsn($opts);
+    if ($dsn === '') {
+        return;
+    }
+
+    Database::init([
+        'dsn' => $dsn,
+        'user' => resolveDbUser($opts),
+        'pass' => resolveDbPassword($opts),
+        'appName' => resolveAppName($opts),
+        'statementTimeoutMs' => resolveDbStatementTimeoutMs($opts),
+    ], $logger);
+    applyStatementTimeoutIfConfigured($opts, $logger);
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveDbDsn(array $opts): string
+{
+    $dsn = $opts['dsn'] ?? '';
+    if (is_string($dsn) && trim($dsn) !== '') {
+        return trim($dsn);
+    }
+
+    return '';
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveDbUser(array $opts): ?string
+{
+    $user = $opts['user'] ?? '';
+    if (is_string($user) && trim($user) !== '') {
+        return trim($user);
+    }
+
+    return null;
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveDbPassword(array $opts): ?string
+{
+    foreach (['password', 'pass'] as $key) {
+        $val = $opts[$key] ?? '';
+        if (is_string($val) && trim($val) !== '') {
+            return trim($val);
+        }
+    }
+
+    return null;
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveAppName(array $opts): string
+{
+    $appName = $opts['app-name'] ?? '';
+    if (is_string($appName) && trim($appName) !== '') {
+        return trim($appName);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('app.name');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+    }
+
+    // Env is allowed only for demo/test, explicitly enabled via --allow-env.
+    if (array_key_exists('allow-env', $opts)) {
+        $env = getenv('APP_NAME');
+        if (is_string($env) && trim($env) !== '') {
+            return trim($env);
+        }
+    }
+
+    return 'blackcat-outbox';
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveOutboxTable(array $opts, bool $allowEnv): string
+{
+    $table = $opts['table'] ?? null;
+    if (is_string($table) && trim($table) !== '') {
+        return trim($table);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $raw = RuntimeConfig::get('db.outbox.table');
+        if (is_string($raw) && trim($raw) !== '') {
+            return trim($raw);
+        }
+    }
+
+    if ($allowEnv) {
+        $env = getenv('OUTBOX_TABLE');
+        if (is_string($env) && trim($env) !== '') {
+            return trim($env);
+        }
+    }
+
+    return 'outbox';
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveOutboxSender(array $opts, bool $allowEnv): string
+{
+    $sender = $opts['sender'] ?? null;
+    if (is_string($sender) && trim($sender) !== '') {
+        return strtolower(trim($sender));
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $raw = RuntimeConfig::get('db.outbox.sender');
+        if (is_string($raw) && trim($raw) !== '') {
+            return strtolower(trim($raw));
+        }
+    }
+
+    if ($allowEnv) {
+        $env = getenv('OUTBOX_SENDER');
+        if (is_string($env) && trim($env) !== '') {
+            return strtolower(trim($env));
+        }
+    }
+
+    return 'stdout';
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveOutboxWebhookUrl(array $opts, bool $allowEnv): string
+{
+    $url = $opts['webhook-url'] ?? null;
+    if (is_string($url) && trim($url) !== '') {
+        return trim($url);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $raw = RuntimeConfig::get('db.outbox.webhook.url');
+        if (is_string($raw) && trim($raw) !== '') {
+            return trim($raw);
+        }
+    }
+
+    if ($allowEnv) {
+        $env = getenv('OUTBOX_WEBHOOK_URL');
+        if (is_string($env) && trim($env) !== '') {
+            return trim($env);
+        }
+    }
+
+    return '';
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveOutboxWebhookAuth(array $opts, bool $allowEnv): ?string
+{
+    $auth = $opts['webhook-auth'] ?? null;
+    if (is_string($auth) && trim($auth) !== '') {
+        return trim($auth);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $raw = RuntimeConfig::get('db.outbox.webhook.auth_bearer');
+        if (is_string($raw) && trim($raw) !== '') {
+            return trim($raw);
+        }
+    }
+
+    if ($allowEnv) {
+        $env = getenv('OUTBOX_WEBHOOK_AUTH');
+        if (is_string($env) && trim($env) !== '') {
+            return trim($env);
+        }
+    }
+
+    return null;
+}
+
+/**
+ * @param array<string,mixed> $opts
+ */
+function resolveOutboxWebhookTimeoutSec(array $opts, bool $allowEnv): int
+{
+    $raw = $opts['webhook-timeout'] ?? null;
+    if (is_string($raw) && trim($raw) !== '' && ctype_digit(trim($raw))) {
+        return max(1, min(60, (int) trim($raw)));
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('db.outbox.webhook.timeout_sec');
+        if (is_int($v)) {
+            return max(1, min(60, $v));
+        }
+        if (is_string($v) && trim($v) !== '' && ctype_digit(trim($v))) {
+            return max(1, min(60, (int) trim($v)));
+        }
+    }
+
+    if ($allowEnv) {
+        $env = getenv('OUTBOX_WEBHOOK_TIMEOUT');
+        if (is_string($env) && trim($env) !== '' && ctype_digit(trim($env))) {
+            return max(1, min(60, (int) trim($env)));
+        }
+    }
+
+    return 5;
+}
+
+/**
+ * Resolve DB statement timeout (ms) for worker queries.
+ *
+ * @param array<string,mixed> $opts
+ */
+function resolveDbStatementTimeoutMs(array $opts): int
+{
+    $raw = $opts['statement-timeout-ms'] ?? null;
+    if (is_string($raw) && trim($raw) !== '' && ctype_digit(trim($raw))) {
+        return (int) trim($raw);
+    }
+
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('db.statement_timeout_ms');
+        if (is_int($v)) {
+            return $v;
+        }
+        if (is_string($v) && trim($v) !== '' && ctype_digit(trim($v))) {
+            return (int) trim($v);
+        }
+    }
+
+    return 5000;
+}
+
+/**
+ * Apply statement timeout after DB bootstrap (needed for secrets-agent boot path).
+ *
+ * @param array<string,mixed> $opts
+ */
+function applyStatementTimeoutIfConfigured(array $opts, ?LoggerInterface $logger = null): void
+{
+    if (!Database::isInitialized()) {
+        return;
+    }
+
+    $ms = resolveDbStatementTimeoutMs($opts);
+    if ($ms <= 0) {
+        return;
+    }
+
+    $db = Database::getInstance();
+
+    try {
+        if ($db->isPg()) {
+            $db->execute('SET statement_timeout = ' . (int) $ms);
+            return;
+        }
+
+        if ($db->isMysql()) {
+            try {
+                $db->execute('SET SESSION max_execution_time = ' . (int) $ms);
+            } catch (\Throwable) {
+                $sec = max(1, (int) ceil($ms / 1000.0));
+                $db->execute('SET SESSION max_statement_time = ' . (int) $sec);
+            }
+            return;
+        }
+    } catch (\Throwable $e) {
+        $logger?->log('warning', 'db-statement-timeout-apply-failed', ['e' => $e->getMessage()]);
+    }
+}

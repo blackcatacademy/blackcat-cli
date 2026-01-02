@@ -45,24 +45,9 @@ return [
             'script' => getenv('BLACKCAT_AGENT_BIN') ?: ($workspaceRoot . '/blackcat-agent/bin/agent'),
             'args' => [],
         ],
-        'crypto' => [
-            'runner' => 'php',
-            'script' => getenv('BLACKCAT_CRYPTO_BIN') ?: ($workspaceRoot . '/blackcat-crypto/bin/crypto'),
-            'args' => [],
-        ],
-        'observability' => [
-            'runner' => 'php',
-            'script' => getenv('BLACKCAT_OBSERVABILITY_BIN') ?: ($workspaceRoot . '/blackcat-observability/bin/observability'),
-            'args' => [],
-        ],
         'auth' => [
             'runner' => 'php',
             'script' => getenv('BLACKCAT_AUTH_BIN') ?: ($workspaceRoot . '/blackcat-auth/bin/auth'),
-            'args' => [],
-        ],
-        'db' => [
-            'runner' => 'php',
-            'script' => getenv('BLACKCAT_DB_BIN') ?: ($workspaceRoot . '/blackcat-database/bin/dbctl.php'),
             'args' => [],
         ],
         'governance' => [

@@ -1,60 +1,76 @@
-# BlackCat CLI Suite
+![BlackCat CLI banner](.github/blackcat-cli-banner.png)
 
-Monorepo pro jednotnou CLI aplikaci `blackcat` (alias `bc`), která sjednocuje správu všech BlackCat komponent – databáze, auth, orchestrátor, governance, observability. Cílem je mít jediný entrypoint pro vývojáře i DevOps:
+# BlackCat CLI
 
-- `blackcat auth ...` – správa klientů, audit hooků, passkey registrace.
-- `blackcat db ...` – instalace, migrace, snapshoty, CDC orchestrace.
-- `blackcat sync ...` – ovládání `blackcat-database-sync` pipeline.
-- `blackcat crypto ...` – rotace klíčů, KMS diagnostika.
-- `blackcat observability ...` – tailování eventů, export metrik.
-- `blackcat orchestrator ...` – spouštění workflow, sledování jobů.
-- `blackcat governance ...` – politika-as-code, audity.
+[![CI](https://github.com/blackcatacademy/blackcat-cli/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/blackcatacademy/blackcat-cli/actions/workflows/ci.yml?query=branch%3Amain)
 
-## Stav
+`blackcat-cli` is an **optional** CLI frontend for the BlackCat ecosystem.
 
-Repo je po Stage 1 upgradu – obsahuje konfigurovatelný loader (`CliConfig`), telemetrii (`CliTelemetry`), bezpečnostní check (`blackcat verify`) a proxy na hlavní backend CLI. Další vývoj naváže na Stage 2+ roadmap (rozšíření backend modulů, AI workflow). CLI bude distribuováno jako PHP Phar i Node CLI (přes `blackcat-auth-js`).
+Goals:
+- a single, consistent CLI UX (`blackcat` / `bc`)
+- security-oriented integration checks (`blackcat verify`)
+- no CLI logic scattered across core libraries (CLI stays here; libraries stay pure)
+- manifest-driven discovery (future-proof docs/help generation)
 
-## Použití
+## Usage
 
 ```bash
-# interaktivní konfigurace shopping listu (env hodnoty)
+# configure a shopping list (installer integration)
 php bin/blackcat configure shopping-list.json
 
-# spustí instalaci (volá blackcat-install -> blackcat-installer)
+# run installation pipeline
 php bin/blackcat install shopping-list.json
 
-# proxy na ostatní CLI
+# proxies to installed component CLIs (when configured)
 php bin/blackcat crypto metrics:export prom
 php bin/blackcat observability events:tail
+php bin/blackcat observability config:print
 php bin/blackcat agent template shopping-list
 php bin/blackcat auth help
 php bin/blackcat db --help
 php bin/blackcat governance policy:list
 php bin/blackcat security checklist stride
+
+# built-in (manifest-discovered) db-crypto tooling
+php bin/blackcat db-crypto plan --schema-source=packages
+php bin/blackcat db-crypto telemetry --out=telemetry/db-crypto-metrics.json
+
+# built-in runtime config tooling (when blackcat-config is present)
+php bin/blackcat config runtime recommend
+php bin/blackcat config runtime init --force
 ```
 
-CLI používá interně `blackcat-install/bin/configure` a `bin/install`. Cesty lze přepsat proměnnými `BLACKCAT_INSTALL_CONFIGURE` a `BLACKCAT_INSTALL_CLI`.
+## Manifest discovery (Stage 2)
 
-Proxy příkazy respektují proměnné `BLACKCAT_CRYPTO_BIN`, `BLACKCAT_OBSERVABILITY_BIN`, `BLACKCAT_AGENT_BIN`, `BLACKCAT_AUTH_BIN`, `BLACKCAT_DB_BIN`, `BLACKCAT_GOVERNANCE_BIN`, `BLACKCAT_SECURITY_BIN`.
+Component repositories can expose a `blackcat-cli.json` manifest at repo root.
+`blackcat-cli` scans the workspace (`blackcat-*/blackcat-cli.json`) and registers commands.
 
-## Konfigurace
-- implicitně se načítá `config/example.cli.php` – přesměruj přes `BLACKCAT_CLI_CONFIG` nebo `--config`.
-- struktura souboru obsahuje `commands`, `defaults.shopping_list`, `telemetry` a `security.allowed_roots`.
-- Profile loader (`config_profile`) umí načíst sdílené profily z `blackcat-config` nebo lokálního `config/profiles/*.php`.
+Manifests are validated by `blackcat-cli-spec`.
+
+## Configuration
+The legacy Stage 1 config loader is still available (`config/example.cli.php`) to keep proxy commands stable.
+Override via `BLACKCAT_CLI_CONFIG` or `--cli-config=/path/to/cli.php`.
 
 ```php
 $config = BlackCat\Cli\Config\CliConfig::fromFile();
 $install = $config->command('install');
 ```
 
-## Telemetrie & bezpečnost
-- Každé spuštění zapisuje event do `var/cli-events.ndjson` + Prometheus metriky do `var/cli-metrics.prom`.
-- `blackcat status [--json]` vypíše připojené binárky (cesta, runner, povolení).
-- `blackcat verify [--json]` provede security/integration check (exit 2 při chybě) a hodí se pro CI.
+## Telemetry & security
+- Each run appends an event to `var/cli-events.ndjson` and Prometheus metrics to `var/cli-metrics.prom`.
+- `blackcat status [--json]` lists configured/discovered commands and their resolved targets.
+- `blackcat verify [--json] [--config=FILE]` performs security/integration checks (exit 2 on failure) and, when available, runs doctor-style checks:
+  - validates runtime config via `blackcat-config` (when present)
+  - when crypto repos are present but runtime config is missing, prints a recommended path and suggests `blackcat config runtime init`
+  - checks Prometheus targets (when `blackcat-monitoring` is present and Prometheus is reachable)
+  - checks monitoring endpoints (Grafana/Loki/Promtail + exporters `/metrics`) when reachable
 
-## Testy
+## Tests
+
+Note: PHPUnit tests expect `blackcat-cli-spec` and `blackcat-config` to be present as sibling directories in the workspace (as in `blackcatacademy`).
 
 ```bash
 bash tests/test.cli
-php tests/ConfigTest.php
+php vendor/bin/phpunit
+php vendor/bin/phpstan analyse --configuration=phpstan.neon
 ```

@@ -1,0 +1,478 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Crypto\Config\CryptoConfig;
+use BlackCat\Crypto\CryptoManager;
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+use BlackCat\DatabaseCrypto\Config\EncryptionMap;
+use BlackCat\DatabaseCrypto\Config\PackagesEncryptionMapLoader;
+use BlackCat\DatabaseCrypto\Telemetry\MapMetrics;
+
+require __DIR__ . '/bootstrap.php';
+
+function usage(): void
+{
+    fwrite(
+        STDERR,
+        "Usage: blackcat db-crypto health [--blackcat-db-root=DIR] [--tables=a,b] [--keys-dir=DIR] [--generate-keys=1] [--config=/path/to/config.json]\n"
+        . "                           [--check-all=1] [--max-contexts=N] [--out=FILE]\n"
+    );
+    exit(1);
+}
+
+/**
+ * @param list<string> $args
+ * @return array<string,string>
+ */
+function parseArgs(array $args): array
+{
+    $options = [];
+    foreach ($args as $arg) {
+        if (!str_starts_with($arg, '--')) {
+            continue;
+        }
+        [$key, $value] = array_pad(explode('=', substr($arg, 2), 2), 2, '1');
+        $options[$key] = $value;
+    }
+    return $options;
+}
+
+function optString(array $options, string $key): ?string
+{
+    $v = $options[$key] ?? null;
+    if (!is_string($v)) {
+        return null;
+    }
+    $v = trim($v);
+    return $v !== '' ? $v : null;
+}
+
+function optInt(array $options, string $key, int $default): int
+{
+    $v = $options[$key] ?? null;
+    if (!is_string($v) || trim($v) === '') {
+        return $default;
+    }
+    if (!preg_match('~^-?\\d+$~', $v)) {
+        return $default;
+    }
+    return (int)$v;
+}
+
+function optBool(array $options, string $key, bool $default = false): bool
+{
+    $v = $options[$key] ?? null;
+    if ($v === null) {
+        return $default;
+    }
+    if (!is_string($v)) {
+        return $default;
+    }
+    $v = strtolower(trim($v));
+    if ($v === '' || $v === '1' || $v === 'true' || $v === 'yes' || $v === 'on') {
+        return true;
+    }
+    if ($v === '0' || $v === 'false' || $v === 'no' || $v === 'off') {
+        return false;
+    }
+    return $default;
+}
+
+/**
+ * @return array{encrypt:list<string>,hmac:list<string>,all:list<string>}
+ */
+function collectContexts(EncryptionMap $map): array
+{
+    $encrypt = [];
+    $hmac = [];
+
+    foreach ($map->all() as $columns) {
+        if (!is_array($columns)) {
+            continue;
+        }
+        foreach ($columns as $spec) {
+            if (!is_array($spec)) {
+                continue;
+            }
+            $strategy = strtolower((string)($spec['strategy'] ?? ''));
+            if ($strategy !== 'encrypt' && $strategy !== 'hmac') {
+                continue;
+            }
+            $ctx = trim((string)($spec['context'] ?? ''));
+            if ($ctx === '') {
+                continue;
+            }
+            if ($strategy === 'encrypt') {
+                $encrypt[$ctx] = true;
+            } else {
+                $hmac[$ctx] = true;
+            }
+        }
+    }
+
+    $encrypt = array_keys($encrypt);
+    $hmac = array_keys($hmac);
+    sort($encrypt);
+    sort($hmac);
+
+    $all = array_values(array_unique(array_merge($encrypt, $hmac)));
+    sort($all);
+
+    return ['encrypt' => $encrypt, 'hmac' => $hmac, 'all' => $all];
+}
+
+function cleanupDir(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+    foreach (glob(rtrim($dir, '/\\') . '/*') ?: [] as $file) {
+        @unlink($file);
+    }
+    @rmdir($dir);
+}
+
+function keyFileBase(string $context): string
+{
+    $base = strtolower(str_replace('.', '_', $context));
+    return preg_replace('~[^a-z0-9_.-]+~', '_', $base) ?: 'key';
+}
+
+function writeHexKey(string $keysDir, string $context, int $version): void
+{
+    $bytes = hash('sha256', $context . '|v' . $version, true);
+    $hex = bin2hex($bytes);
+    $path = rtrim($keysDir, '/\\') . '/' . keyFileBase($context) . '_v' . $version . '.hex';
+    file_put_contents($path, $hex . PHP_EOL);
+    @chmod($path, 0600);
+}
+
+/**
+ * @param list<string> $contexts
+ */
+function generateKeys(string $keysDir, array $contexts, int $versions = 2): void
+{
+    $versions = max(1, $versions);
+    foreach ($contexts as $ctx) {
+        for ($v = 1; $v <= $versions; $v++) {
+            writeHexKey($keysDir, $ctx, $v);
+        }
+    }
+}
+
+function tamperEnvelopeKeyId(string $serializedEnvelope, string $newKeyId): string
+{
+    $decoded = json_decode($serializedEnvelope, true);
+    if (!is_array($decoded) || !isset($decoded['local']) || !is_array($decoded['local'])) {
+        throw new RuntimeException('Invalid envelope JSON');
+    }
+    $decoded['local']['keyId'] = $newKeyId;
+    $json = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        throw new RuntimeException('Unable to encode envelope JSON');
+    }
+    return $json;
+}
+
+function pickAlternateKeyId(CryptoManager $crypto, string $context, string $currentKeyId): ?string
+{
+    foreach ($crypto->allKeyMaterial($context) as $mat) {
+        if ($mat->id !== $currentKeyId) {
+            return $mat->id;
+        }
+    }
+    return null;
+}
+
+/**
+ * @param array<string,mixed> $value
+ * @return array<string,mixed>
+ */
+function canonicalize(array $value): array
+{
+    foreach ($value as $k => $v) {
+        if (is_array($v)) {
+            $value[$k] = canonicalize($v);
+        }
+    }
+
+    // Sort associative keys; keep numeric arrays in order.
+    $keys = array_keys($value);
+    $isList = ($keys === array_keys($keys));
+    if (!$isList) {
+        ksort($value);
+    }
+    return $value;
+}
+
+try {
+    $options = parseArgs(array_slice($argv, 1));
+    if (isset($options['help']) || isset($options['h'])) {
+        usage();
+    }
+
+    $generateKeys = optBool($options, 'generate-keys', false);
+    initRuntimeConfig($options, !$generateKeys);
+
+    $root = optString($options, 'blackcat-db-root');
+    $map = $root !== null
+        ? PackagesEncryptionMapLoader::fromBlackcatDatabaseRoot($root)
+        : PackagesEncryptionMapLoader::fromAutodetectedBlackcatDatabaseRoot();
+
+    $tablesFilter = optString($options, 'tables');
+    if ($tablesFilter !== null) {
+        $wanted = array_fill_keys(array_map('strtolower', array_filter(array_map('trim', explode(',', $tablesFilter)))), true);
+        $subset = [];
+        foreach ($map->all() as $t => $cols) {
+            $tk = strtolower((string)$t);
+            if (isset($wanted[$tk])) {
+                $subset[$tk] = $cols;
+                unset($wanted[$tk]);
+            }
+        }
+        if ($wanted !== []) {
+            throw new RuntimeException('Unknown table(s) in --tables: ' . implode(', ', array_keys($wanted)));
+        }
+        $wrapped = [];
+        foreach ($subset as $t => $cols) {
+            $wrapped[(string)$t] = ['columns' => $cols];
+        }
+        $map = EncryptionMap::fromArray(['tables' => $wrapped]);
+    }
+
+    $contexts = collectContexts($map);
+
+    $generatedKeys = false;
+    if ($generateKeys) {
+        $keysDir = sys_get_temp_dir() . '/bcat-dbcrypto-health-keys-' . bin2hex(random_bytes(5));
+        if (!is_dir($keysDir) && !mkdir($keysDir, 0700, true) && !is_dir($keysDir)) {
+            throw new RuntimeException('Cannot create temp keys dir: ' . $keysDir);
+        }
+        @chmod($keysDir, 0700);
+        $generatedKeys = true;
+        generateKeys($keysDir, $contexts['all'], 2);
+    } else {
+        $keysDir = resolveKeysDir($options);
+        if ($keysDir === null) {
+            throw new RuntimeException('Missing crypto keys dir (set runtime config crypto.keys_dir or pass --keys-dir=DIR, or use --generate-keys=1).');
+        }
+    }
+
+    if (!is_dir($keysDir)) {
+        throw new RuntimeException('Keys dir not found: ' . $keysDir);
+    }
+
+    $cryptoCfg = RuntimeConfig::isInitialized()
+        ? CryptoConfig::fromRuntimeConfig()
+        : CryptoConfig::fromArray(['keys_dir' => $keysDir, 'kms' => []]);
+
+    $crypto = CryptoManager::boot($cryptoCfg);
+
+    $maxContexts = max(0, optInt($options, 'max-contexts', 25));
+    $checkAll = optBool($options, 'check-all', false);
+
+    $errors = [];
+    $warnings = [];
+
+    $missingKeyMaterial = [];
+    if ($checkAll) {
+        foreach ($contexts['all'] as $ctx) {
+            try {
+                $crypto->keyMaterial($ctx);
+            } catch (Throwable $e) {
+                $missingKeyMaterial[] = $ctx;
+            }
+        }
+    }
+
+    $testedEncrypt = array_slice($contexts['encrypt'], 0, $maxContexts);
+    $testedHmac = array_slice($contexts['hmac'], 0, $maxContexts);
+
+    $roundtrip = [
+        'encrypt_ok' => 0,
+        'encrypt_fail' => 0,
+        'encrypt_fallback_ok' => 0,
+        'encrypt_fallback_fail' => 0,
+        'hmac_ok' => 0,
+        'hmac_fail' => 0,
+        'hmac_fallback_ok' => 0,
+        'hmac_fallback_fail' => 0,
+    ];
+
+    foreach ($testedEncrypt as $ctx) {
+        try {
+            $plaintext = 'health:' . $ctx . ':' . time();
+            $env = $crypto->encryptContext($ctx, $plaintext)->encode();
+            $out = $crypto->decryptContext($ctx, $env);
+            if ($out !== $plaintext) {
+                throw new RuntimeException('roundtrip mismatch');
+            }
+            $roundtrip['encrypt_ok']++;
+
+            $decoded = json_decode($env, true);
+            $currentKeyId = is_array($decoded) && is_array($decoded['local'] ?? null)
+                ? (string)($decoded['local']['keyId'] ?? '')
+                : '';
+            if ($currentKeyId !== '') {
+                $alt = pickAlternateKeyId($crypto, $ctx, $currentKeyId);
+                if (is_string($alt) && $alt !== '') {
+                    $tampered = tamperEnvelopeKeyId($env, $alt);
+                    $out2 = $crypto->decryptContext($ctx, $tampered);
+                    if ($out2 !== $plaintext) {
+                        throw new RuntimeException('fallback mismatch');
+                    }
+                    $roundtrip['encrypt_fallback_ok']++;
+                }
+            }
+        } catch (Throwable $e) {
+            $roundtrip['encrypt_fail']++;
+        }
+    }
+
+    foreach ($testedHmac as $ctx) {
+        try {
+            $msg = 'health:' . $ctx . ':' . time();
+            $signed = $crypto->hmacWithKeyId($ctx, $msg);
+            $sig = $signed['signature'];
+            $keyId = $signed['keyId'];
+
+            if (!$crypto->verifyHmacWithKeyId($ctx, $msg, $sig, $keyId)) {
+                throw new RuntimeException('verify failed');
+            }
+            $roundtrip['hmac_ok']++;
+
+            $alt = pickAlternateKeyId($crypto, $ctx, $keyId);
+            if (is_string($alt) && $alt !== '') {
+                if ($crypto->verifyHmacWithKeyId($ctx, $msg, $sig, $alt)) {
+                    $roundtrip['hmac_fallback_ok']++;
+                } else {
+                    $roundtrip['hmac_fallback_fail']++;
+                }
+            }
+        } catch (Throwable $e) {
+            $roundtrip['hmac_fail']++;
+        }
+    }
+
+    if ($missingKeyMaterial !== []) {
+        $errors[] = 'Missing key material for some contexts (set --check-all=0 to sample only).';
+    }
+
+    $metrics = MapMetrics::summarize($map);
+    $canonicalMap = canonicalize(['tables' => $map->all()]);
+    $mapHash = hash('sha256', json_encode($canonicalMap, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '');
+
+    $ok = ($errors === [] && $metrics['missing_strategy'] === [] && $metrics['missing_context'] === []);
+
+    $report = [
+        'ok' => $ok,
+        'generated_keys' => $generatedKeys,
+        'keys_dir' => $keysDir,
+        'tables' => count($map->all()),
+        'contexts' => [
+            'total' => count($contexts['all']),
+            'encrypt' => count($contexts['encrypt']),
+            'hmac' => count($contexts['hmac']),
+        ],
+        'checked' => [
+            'check_all' => $checkAll,
+            'tested_encrypt' => count($testedEncrypt),
+            'tested_hmac' => count($testedHmac),
+            'missing_key_material' => count($missingKeyMaterial),
+        ],
+        'roundtrip' => $roundtrip,
+        'map_hash_sha256' => $mapHash,
+        'map_metrics' => $metrics,
+        'errors' => $errors,
+        'warnings' => $warnings,
+        'missing_key_material_sample' => array_slice($missingKeyMaterial, 0, 25),
+    ];
+
+    $json = json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        throw new RuntimeException('Unable to encode JSON report');
+    }
+
+    $outPath = optString($options, 'out');
+    if ($outPath !== null) {
+        $dir = dirname($outPath);
+        if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+            throw new RuntimeException('Cannot create output directory: ' . $dir);
+        }
+        file_put_contents($outPath, $json . PHP_EOL);
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            @chmod($dir, 0750);
+            @chmod($outPath, 0600);
+        }
+        echo "Health report written to {$outPath}\n";
+    } else {
+        echo $json . PHP_EOL;
+    }
+
+    if ($generatedKeys) {
+        cleanupDir($keysDir);
+    }
+
+    exit($ok ? 0 : 1);
+} catch (Throwable $e) {
+    $json = json_encode([
+        'ok' => false,
+        'error' => $e->getMessage(),
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+    if ($json !== false) {
+        fwrite(STDERR, $json . PHP_EOL);
+    } else {
+        fwrite(STDERR, 'db-crypto-health error: ' . $e->getMessage() . PHP_EOL);
+    }
+    exit(1);
+}
+
+/**
+ * Initialize blackcat-config runtime config for CLI tools.
+ *
+ * @param array<string,string> $options
+ */
+function initRuntimeConfig(array $options, bool $auto = true): void
+{
+    $cfg = $options['config'] ?? ($options['config-file'] ?? null);
+    if ($cfg === '1') {
+        $cfg = '';
+    }
+
+    if (!$auto) {
+        if (is_string($cfg) && trim($cfg) !== '') {
+            throw new RuntimeException('--generate-keys is incompatible with --config/--config-file.');
+        }
+        return;
+    }
+
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    if ($auto) {
+        RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+    }
+}
+
+/**
+ * Resolve keys dir from runtime config (preferred) or CLI flags.
+ *
+ * @param array<string,string> $options
+ */
+function resolveKeysDir(array $options): ?string
+{
+    if (RuntimeConfig::isInitialized()) {
+        $v = RuntimeConfig::get('crypto.keys_dir');
+        if (is_string($v) && trim($v) !== '') {
+            return trim($v);
+        }
+        return null;
+    }
+
+    $opt = optString($options, 'keys-dir') ?? optString($options, 'keys_dir');
+    return $opt !== null && $opt !== '' ? $opt : null;
+}

@@ -1,0 +1,15 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/bootstrap.php';
+
+if (!class_exists(\BlackCat\Crypto\CLI\Application::class)) {
+    fwrite(STDERR, "[crypto] blackcat/crypto is not installed or not available in this workspace.\n");
+    fwrite(STDERR, "Install blackcat/crypto (library) and blackcatacademy/blackcat-cli (CLI frontend).\n");
+    exit(1);
+}
+
+$app = new \BlackCat\Crypto\CLI\Application();
+exit($app->run($argv));
+

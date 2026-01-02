@@ -1,0 +1,38 @@
+{
+  "name": "blackcatacademy/blackcat-cli",
+  "description": "Optional CLI frontend for the BlackCat ecosystem (single source of truth for CLI UX + routing).",
+  "type": "project",
+  "license": "proprietary",
+  "require": {
+    "php": "^8.3",
+    "ext-json": "*"
+  },
+  "autoload": {
+    "psr-4": {
+      "BlackCat\\Cli\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "BlackCat\\Cli\\Tests\\": "tests/"
+    }
+  },
+  "require-dev": {
+    "phpstan/phpstan": "^1.11",
+    "phpstan/phpstan-phpunit": "^1.4",
+    "phpunit/phpunit": "^11.0"
+  },
+  "bin": [
+    "bin/blackcat"
+  ],
+  "scripts": {
+    "test": "vendor/bin/phpunit --colors=always",
+    "stan": "php -d memory_limit=512M vendor/bin/phpstan analyse --configuration=phpstan.neon"
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "sort-packages": true
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}

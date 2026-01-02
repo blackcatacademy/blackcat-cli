@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout blackcat-cli
+        uses: actions/checkout@v6
+        with:
+          path: blackcat-cli
+
+      - name: Checkout blackcat-cli-spec (manifest schema/validator)
+        uses: actions/checkout@v6
+        with:
+          repository: blackcatdatabase/blackcat-cli-spec
+          path: blackcat-cli-spec
+          token: ${{ secrets.BLACKCAT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Checkout blackcat-config (runtime config + hardening)
+        uses: actions/checkout@v6
+        with:
+          repository: blackcatacademy/blackcat-config
+          path: blackcat-config
+          token: ${{ secrets.BLACKCAT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer
+
+      - name: Install dependencies
+        working-directory: blackcat-cli
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: PHPUnit
+        working-directory: blackcat-cli
+        run: composer run -q test
+
+      - name: PHPStan (level 8)
+        working-directory: blackcat-cli
+        run: composer run -q stan

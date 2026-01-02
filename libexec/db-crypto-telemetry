@@ -1,0 +1,104 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\DatabaseCrypto\Config\EncryptionMap;
+use BlackCat\DatabaseCrypto\Config\PackagesEncryptionMapLoader;
+use BlackCat\DatabaseCrypto\Telemetry\MapMetrics;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * Generate telemetry summary for an encryption map.
+ *
+ * Usage:
+ *   blackcat db-crypto telemetry [--blackcat-db-root=DIR] [--map=map.json] [--out=telemetry/db-crypto-metrics.json]
+ *
+ * Default: load the merged map from `blackcat-database/packages/<package>/schema/encryption-map.json`.
+ */
+function dbcrypto_usage(): void
+{
+    fwrite(STDERR, "Usage: blackcat db-crypto telemetry [--blackcat-db-root=DIR] [--map=FILE] [--out=FILE]\n");
+    exit(1);
+}
+
+try {
+    $args = $argv;
+    array_shift($args); // script name
+
+    $mapPath = null;
+    $blackcatDbRoot = null;
+    $outPath = null;
+
+    foreach ($args as $i => $arg) {
+        if (str_starts_with($arg, '--out=')) {
+            $outPath = substr($arg, 6);
+            unset($args[$i]);
+            continue;
+        }
+        if ($arg === '--out') {
+            $outPath = $args[$i + 1] ?? null;
+            unset($args[$i], $args[$i + 1]);
+            continue;
+        }
+        if (str_starts_with($arg, '--map=')) {
+            $mapPath = substr($arg, 6);
+            unset($args[$i]);
+            continue;
+        }
+        if ($arg === '--map') {
+            $mapPath = $args[$i + 1] ?? null;
+            unset($args[$i], $args[$i + 1]);
+            continue;
+        }
+        if (str_starts_with($arg, '--blackcat-db-root=')) {
+            $blackcatDbRoot = substr($arg, 18);
+            unset($args[$i]);
+            continue;
+        }
+        if ($arg === '--blackcat-db-root') {
+            $blackcatDbRoot = $args[$i + 1] ?? null;
+            unset($args[$i], $args[$i + 1]);
+            continue;
+        }
+    }
+
+    $args = array_values($args);
+    if (count($args) > 0 && ($mapPath === null || $mapPath === '')) {
+        $mapPath = $args[0];
+    }
+
+    if (is_string($mapPath) && $mapPath !== '') {
+        $map = EncryptionMap::fromFile($mapPath);
+    } else {
+        $root = is_string($blackcatDbRoot) && trim($blackcatDbRoot) !== '' ? trim($blackcatDbRoot) : null;
+        $map = $root !== null
+            ? PackagesEncryptionMapLoader::fromBlackcatDatabaseRoot($root)
+            : PackagesEncryptionMapLoader::fromAutodetectedBlackcatDatabaseRoot();
+    }
+
+    $metrics = MapMetrics::summarize($map);
+
+    $json = json_encode($metrics, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        throw new RuntimeException('Unable to encode metrics to JSON');
+    }
+
+    if ($outPath !== null && $outPath !== '') {
+        $dir = dirname($outPath);
+        if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+            throw new RuntimeException('Cannot create output directory: ' . $dir);
+        }
+        file_put_contents($outPath, $json . PHP_EOL);
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            @chmod($dir, 0750);
+            @chmod($outPath, 0600);
+        }
+        fwrite(STDOUT, "Telemetry written to {$outPath}" . PHP_EOL);
+    } else {
+        fwrite(STDOUT, $json . PHP_EOL);
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, 'db-crypto-telemetry error: ' . $e->getMessage() . PHP_EOL);
+    exit(1);
+}

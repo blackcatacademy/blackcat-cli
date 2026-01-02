@@ -1,0 +1,193 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * monitoring infra
+ *
+ * Usage:
+ *   blackcat monitoring infra info [--dir=PATH]
+ *   blackcat monitoring infra init [--dir=PATH] [args...]
+ *   blackcat monitoring infra plan [--dir=PATH] [args...]
+ *   blackcat monitoring infra apply [--dir=PATH] [--auto-approve] [args...]
+ *   blackcat monitoring infra destroy [--dir=PATH] [--auto-approve] [args...]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+$action = (string)($positionals[0] ?? 'help');
+$passThrough = array_slice($positionals, 1);
+
+$workspaceRoot = dirname(__DIR__, 2);
+$dir = (string)($options['dir'] ?? '');
+if ($dir === '') {
+    $dir = $workspaceRoot . '/blackcat-monitoring/infra/terraform';
+}
+
+if ($action === '' || $action === 'help' || $action === '--help' || $action === '-h') {
+    usage($dir);
+    exit(0);
+}
+
+if (!is_dir($dir)) {
+    err("Infra dir not found: {$dir}");
+    exit(2);
+}
+
+switch ($action) {
+    case 'info':
+        out('monitoring infra');
+        out('Terraform root: ' . $dir);
+        out('');
+        out('Docs: ' . rtrim(dirname($dir), '/\\') . '/README.md');
+        exit(0);
+
+    case 'init':
+    case 'plan':
+    case 'apply':
+    case 'destroy':
+    case 'validate':
+    case 'fmt':
+        exit(runTerraform($action, $dir, $options, $passThrough));
+
+    default:
+        err("Unknown action: {$action}");
+        usage($dir);
+        exit(1);
+}
+
+/**
+ * @param array<string,string|bool> $options
+ * @param list<string> $args
+ */
+function runTerraform(string $action, string $dir, array $options, array $args): int
+{
+    $terraform = findBinary('terraform');
+    if ($terraform === null) {
+        err('terraform not found in PATH.');
+        err('Install Terraform 1.5+ or run in an environment that provides it.');
+        return 127;
+    }
+
+    $cmdArgs = [$action];
+    if (($action === 'apply' || $action === 'destroy') && array_key_exists('auto-approve', $options)) {
+        $cmdArgs[] = '-auto-approve';
+    }
+    $cmdArgs = array_merge($cmdArgs, $args);
+
+    $proc = proc_open(array_merge([$terraform], $cmdArgs), [0 => STDIN, 1 => STDOUT, 2 => STDERR], $pipes, $dir);
+    if (!is_resource($proc)) {
+        err('Failed to start terraform.');
+        return 1;
+    }
+    return proc_close($proc);
+}
+
+function usage(string $dir): void
+{
+    out('monitoring infra');
+    out('Usage: blackcat monitoring infra <info|init|plan|apply|destroy|validate|fmt> [options] [args...]');
+    out('');
+    out('Options:');
+    out('  --dir=PATH              Terraform root (default: ' . $dir . ')');
+    out('  --auto-approve          Add -auto-approve to apply/destroy');
+    out('');
+    out('Examples:');
+    out('  blackcat monitoring infra info');
+    out('  blackcat monitoring infra init');
+    out('  blackcat monitoring infra plan');
+    out('  blackcat monitoring infra apply --auto-approve');
+}
+
+function out(string $line): void
+{
+    echo $line . PHP_EOL;
+}
+
+function err(string $line): void
+{
+    fwrite(STDERR, $line . PHP_EOL);
+}
+
+/**
+ * @param string[] $args
+ * @return array{0:array<string,string|bool>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    /** @var array<string,string|bool> $options */
+    $options = [];
+    /** @var list<string> $positionals */
+    $positionals = [];
+
+    while ($args !== []) {
+        $arg = array_shift($args);
+        if ($arg === '--') {
+            $positionals = array_merge($positionals, array_values(array_filter($args, 'is_string')));
+            break;
+        }
+
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--')) {
+            $pair = explode('=', substr($arg, 2), 2);
+            $key = $pair[0] ?? '';
+            if ($key === '') {
+                continue;
+            }
+
+            if (count($pair) === 2) {
+                $options[$key] = (string) $pair[1];
+                continue;
+            }
+
+            $next = $args[0] ?? null;
+            if (is_string($next) && $next !== '' && !str_starts_with($next, '-')) {
+                $options[$key] = (string) array_shift($args);
+            } else {
+                $options[$key] = true;
+            }
+            continue;
+        }
+
+        $positionals[] = $arg;
+    }
+
+    return [$options, $positionals];
+}
+
+function findBinary(string $name): ?string
+{
+    $path = getenv('PATH');
+    if (!is_string($path) || $path === '') {
+        return null;
+    }
+
+    $candidates = [$name];
+    if (DIRECTORY_SEPARATOR === '\\') {
+        $candidates[] = $name . '.exe';
+        $candidates[] = $name . '.bat';
+        $candidates[] = $name . '.cmd';
+    }
+
+    foreach (explode(PATH_SEPARATOR, $path) as $dir) {
+        $dir = trim($dir);
+        if ($dir === '') {
+            continue;
+        }
+        foreach ($candidates as $file) {
+            $full = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . $file;
+            if (is_file($full) && is_executable($full)) {
+                return $full;
+            }
+        }
+    }
+
+    return null;
+}
+

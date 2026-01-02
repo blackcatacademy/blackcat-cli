@@ -1,0 +1,278 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use BlackCat\Config\Runtime\Config as RuntimeConfig;
+use BlackCat\Core\Database;
+use BlackCat\Core\Database\DbBootstrap;
+
+require __DIR__ . '/bootstrap.php';
+
+/**
+ * db
+ *
+ * Minimal DB tooling for BlackCat\Core\Database.
+ *
+ * Usage:
+ *   blackcat db ping [--dsn=...]
+ *   blackcat db explain "<SQL>" [--analyze] [--dsn=...]
+ *   blackcat db route primary|replica "<SQL>" [--dsn=...]
+ *   blackcat db wait-replica [--ms=1500] [--dsn=...]
+ *   blackcat db trace [--dsn=...]
+ *
+ * DB config (priority):
+ *   1) --bootstrap=/path/to/bootstrap.php  (calls Database::init)
+ *   2) secrets-agent via runtime config (db.agent.socket_path)
+ *   3) --dsn=... [--user=... --password=...]
+ */
+
+$args = array_slice($argv, 1);
+[$options, $positionals] = parseArgs($args);
+
+initRuntimeConfig($options);
+requireBootstrapIfProvided($options);
+
+try {
+    ensureDatabaseInitialized($options);
+
+    $cmd = $positionals[0] ?? '';
+    if ($cmd === '' || $cmd === 'help' || $cmd === '--help' || $cmd === '-h') {
+        usage();
+        exit(0);
+    }
+
+    // Application bootstrap must have already called Database::init(...)
+    if (!Database::isInitialized()) {
+        err('Database not initialized. Provide --bootstrap=FILE, configure secrets-agent (db.agent.socket_path), or pass --dsn=... --user=... --password=....');
+        exit(2);
+    }
+
+    $db = Database::getInstance();
+
+    switch ($cmd) {
+        case 'ping':
+            out($db->ping() ? 'OK' : 'FAIL');
+            break;
+
+        case 'explain':
+            $sql = $positionals[1] ?? '';
+            if ($sql === '') {
+                err('Missing SQL to explain.');
+                usage();
+                exit(1);
+            }
+            $analyze = array_key_exists('analyze', $options);
+            out($db->explainPlan($sql, [], $analyze));
+            break;
+
+        case 'route':
+            $target = $positionals[1] ?? '';
+            $sql = $positionals[2] ?? '';
+            if ($target === '' || $sql === '') {
+                err('Usage: blackcat db route primary|replica "<SQL>"');
+                exit(1);
+            }
+            if ($target === 'primary') {
+                $result = $db->withPrimary(fn (): array => $db->fetchAll($sql));
+            } elseif ($target === 'replica') {
+                $result = $db->withReplica(fn (): array => $db->fetchAll($sql));
+            } else {
+                err('route must be primary|replica');
+                exit(3);
+            }
+            out($result);
+            break;
+
+        case 'wait-replica':
+            $ms = 1500;
+            if (isset($options['ms']) && is_string($options['ms']) && $options['ms'] !== '1') {
+                $ms = (int) $options['ms'];
+            }
+            out($db->waitForReplica($ms) ? 'READY' : 'TIMEOUT');
+            break;
+
+        case 'trace':
+            out($db->getLastQueries());
+            break;
+
+        default:
+            usage();
+            exit(1);
+    }
+} catch (Throwable $e) {
+    err('db error: ' . $e->getMessage());
+    exit(1);
+}
+
+function out(mixed $payload): void
+{
+    if (is_string($payload)) {
+        fwrite(STDOUT, $payload . PHP_EOL);
+        return;
+    }
+    fwrite(STDOUT, json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL);
+}
+
+function err(string $message): void
+{
+    fwrite(STDERR, $message . PHP_EOL);
+}
+
+function usage(): void
+{
+    out(
+        "db usage:\n" .
+        "  blackcat db ping [--dsn=...]\n" .
+        "  blackcat db explain '<SQL>' [--analyze] [--dsn=...]\n" .
+        "  blackcat db route primary|replica '<SQL>' [--dsn=...]\n" .
+        "  blackcat db wait-replica [--ms=1500] [--dsn=...]\n" .
+        "  blackcat db trace [--dsn=...]\n" .
+        "\n" .
+        "DB config sources (priority):\n" .
+        "  1) --bootstrap=/path/to/bootstrap.php  (calls Database::init)\n" .
+        "  2) secrets-agent via runtime config (db.agent.socket_path)\n" .
+        "  3) --dsn=... [--user=... --password=...]\n"
+    );
+}
+
+/**
+ * @param list<string> $args
+ * @return array{0:array<string,string>,1:list<string>}
+ */
+function parseArgs(array $args): array
+{
+    $options = [];
+    $positionals = [];
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, '--')) {
+            [$key, $value] = array_pad(explode('=', substr($arg, 2), 2), 2, '1');
+            $options[$key] = $value;
+            continue;
+        }
+        $positionals[] = $arg;
+    }
+    return [$options, $positionals];
+}
+
+/**
+ * Initialize blackcat-config runtime config for CLI tools.
+ *
+ * @param array<string,string> $options
+ */
+function initRuntimeConfig(array $options): void
+{
+    if (!class_exists(RuntimeConfig::class)) {
+        return;
+    }
+
+    $cfg = $options['config'] ?? ($options['config-file'] ?? null);
+    if ($cfg === '1') {
+        $cfg = '';
+    }
+    if (is_string($cfg) && trim($cfg) !== '') {
+        RuntimeConfig::initFromJsonFileIfNeeded(trim($cfg));
+        return;
+    }
+
+    RuntimeConfig::tryInitFromFirstAvailableJsonFile();
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function requireBootstrapIfProvided(array $options): void
+{
+    $bootstrap = $options['bootstrap'] ?? '';
+    if ($bootstrap === '1') {
+        $bootstrap = '';
+    }
+    if (!is_string($bootstrap) || trim($bootstrap) === '') {
+        return;
+    }
+
+    $path = trim($bootstrap);
+    if (!is_file($path)) {
+        throw new RuntimeException('Bootstrap file not found: ' . $path);
+    }
+
+    require $path;
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function ensureDatabaseInitialized(array $options): void
+{
+    if (Database::isInitialized()) {
+        return;
+    }
+
+    if (class_exists(DbBootstrap::class) && class_exists(RuntimeConfig::class) && RuntimeConfig::isInitialized()) {
+        try {
+            DbBootstrap::initFromSecretsAgentIfNeeded(appName: 'blackcat-cli:db');
+            return;
+        } catch (\Throwable) {
+            // Fall through to explicit DSN flags.
+        }
+    }
+
+    $dsn = resolveDbDsn($options);
+    if ($dsn === '') {
+        return;
+    }
+
+    Database::init([
+        'dsn' => $dsn,
+        'user' => resolveDbUser($options),
+        'pass' => resolveDbPassword($options),
+        'appName' => 'blackcat-cli:db',
+    ]);
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveDbDsn(array $options): string
+{
+    $dsn = $options['dsn'] ?? '';
+    if ($dsn === '1') {
+        $dsn = '';
+    }
+    if (is_string($dsn) && trim($dsn) !== '') {
+        return trim($dsn);
+    }
+
+    return '';
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveDbUser(array $options): ?string
+{
+    $user = $options['user'] ?? '';
+    if ($user === '1') {
+        $user = '';
+    }
+    if (is_string($user) && trim($user) !== '') {
+        return trim($user);
+    }
+
+    return null;
+}
+
+/**
+ * @param array<string,string> $options
+ */
+function resolveDbPassword(array $options): ?string
+{
+    $pass = $options['password'] ?? ($options['pass'] ?? '');
+    if ($pass === '1') {
+        $pass = '';
+    }
+    if (is_string($pass) && trim($pass) !== '') {
+        return trim($pass);
+    }
+
+    return null;
+}

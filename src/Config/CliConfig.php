@@ -11,6 +11,9 @@ final class CliConfig
     /** @var array<string,mixed> */
     private array $payload;
 
+    /**
+     * @param array<string,mixed> $payload
+     */
     private function __construct(array $payload)
     {
         $this->payload = $payload;

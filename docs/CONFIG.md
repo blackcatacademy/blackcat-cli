@@ -1,33 +1,68 @@
 # BlackCat CLI – Configuration & Telemetry
 
-Stage 1 přidává konfigurační loader `BlackCat\\Cli\\Config\\CliConfig`, který sjednocuje všechny binárky a bezpečnostní kontroly.
+Stage 1 provides a minimal, safe foundation:
+- a legacy config loader (`BlackCat\\Cli\\Config\\CliConfig`) for proxy commands,
+- telemetry writer (`CliTelemetry`),
+- integration/security checks (`blackcat status`, `blackcat verify`).
 
-## Konfigurační soubor
-- implicitně se načítá `config/example.cli.php` – přesměruj přes `BLACKCAT_CLI_CONFIG` nebo `--config`.
-- obsahuje:
-  - `commands` – runner (`php`/`node`), skript, defaultní argumenty.
-  - `defaults.shopping_list` – fallback JSON pro `configure/install`.
-  - `config_profile` – volitelný import env proměnných z `blackcat-config`/`config/profiles`.
-  - `security.allowed_roots` – whitelisting cest, které smí CLI spouštět.
+Stage 2 adds manifest discovery (see below).
+
+## CLI config file (Stage 1)
+
+- default: `config/example.cli.php`
+- override: `--cli-config=/path/to/cli.php` or `BLACKCAT_CLI_CONFIG`
+- contains:
+  - `commands` (proxy targets): runner (`php`/`node`), script, default args
+  - `defaults.shopping_list` for `configure/install`
+  - `config_profile` optional profile import (`blackcat-config` or local `config/profiles/*.php`)
+  - `security.allowed_roots` allowlist for proxy targets
 
 ```php
+use BlackCat\Cli\Config\CliConfig;
+
 $config = CliConfig::fromFile();
 $install = $config->command('install');
 ```
 
-## Telemetrie
-`CliTelemetry` zapisuje události do `var/cli-events.ndjson` a Prometheus metriky do `var/cli-metrics.prom`.
+Note: `--config`/`--config-file` is reserved for **runtime config** (blackcat-config) and is forwarded to component tools that support it.
 
-| Metric | Popis |
-| --- | --- |
-| `blackcat_cli_command_total{command="install"}` | počet spuštění konkrétního příkazu za běh |
+## Runtime config (blackcat-config)
 
-## Bezpečnost + integrace
-`blackcat status` vypíše všechny proxované binárky, `blackcat verify` (exit 2) kontroluje, že cíle existují a leží v povolených složkách.
+When `blackcat-config` is present in the workspace, `blackcat-cli` exposes built-in helpers:
 
 ```bash
-php bin/blackcat status --json | jq '.commands[] | select(.command=="install")'
-php bin/blackcat verify
+php bin/blackcat config runtime paths
+php bin/blackcat config runtime recommend
+php bin/blackcat config runtime init --force
+php bin/blackcat config runtime init --path=/etc/blackcat/config.runtime.json --force
 ```
 
-Soubor `config/profiles/example.profiles.php` slouží jako šablona pro centralizované profily sdílené v `blackcat-config`.
+## Manifest discovery (Stage 2)
+
+Component repositories can declare CLI capabilities in `blackcat-cli.json` at repo root.
+`blackcat-cli` discovers manifests in the workspace (`blackcat-*/blackcat-cli.json`) and registers commands.
+
+Manifests are validated by `blackcat-cli-spec`.
+
+## Telemetry
+
+`CliTelemetry` appends events to `var/cli-events.ndjson` and Prometheus metrics to `var/cli-metrics.prom`.
+
+| Metric | Description |
+| --- | --- |
+| `blackcat_cli_command_total{command="install"}` | per-command invocation counter |
+
+## Security + integrations
+
+`blackcat status` prints configured/discovered commands.
+
+`blackcat verify` (exit 2) ensures proxy targets exist and are inside allowed roots, and can also run doctor-style checks:
+- runtime config validation via `blackcat-config` (when present; pass `--config=FILE` to force a specific JSON file)
+- Prometheus target health (when `blackcat-monitoring` is present and Prometheus is reachable)
+- monitoring endpoints (Grafana/Loki/Promtail + exporters `/metrics`) when reachable
+
+```bash
+php bin/blackcat status --json
+php bin/blackcat verify --json
+php bin/blackcat verify --json --config=/etc/blackcat/config.runtime.json
+```

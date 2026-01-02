@@ -2,10 +2,41 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 ROOT=$(realpath "$SCRIPT_DIR/../")
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+install -d -m 0750 "$TMP/keys" "$TMP/observability"
+umask 0077
+cat > "$TMP/config.runtime.json" <<'JSON'
+{"crypto":{"keys_dir":"__KEYS__"},"observability":{"storage_dir":"__OBS__","service":"blackcat-cli-test"}}
+JSON
+sed -i "s#__KEYS__#$TMP/keys#g; s#__OBS__#$TMP/observability#g" "$TMP/config.runtime.json"
+
 php "$ROOT/bin/blackcat" help
+php "$ROOT/bin/blackcat" help | grep "db-crypto" >/dev/null
 
 php "$ROOT/bin/blackcat" status --json | grep '"command"' >/dev/null
-php "$ROOT/bin/blackcat" verify --json >/dev/null
+php "$ROOT/bin/blackcat" verify --json --config="$TMP/config.runtime.json" >/dev/null
+
+REQ="$TMP/trust-request.json"
+TX="$TMP/trust-tx.json"
+php "$ROOT/bin/blackcat" trust request:init \
+  --out="$REQ" \
+  --root-authority=0x1111111111111111111111111111111111111111 \
+  --upgrade-authority=0x2222222222222222222222222222222222222222 \
+  --emergency-authority=0x3333333333333333333333333333333333333333 \
+  --rpc=https://rpc.layeredge.io --chain-id=4207 --mode=root_uri --max-stale-sec=180 \
+  --genesis-root=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --genesis-uri-hash=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+test -s "$REQ"
+
+php "$ROOT/bin/blackcat" trust tx:factory-create \
+  --factory=0x4444444444444444444444444444444444444444 \
+  --request="$REQ" \
+  --out="$TX"
+test -s "$TX"
+grep -q '"to": "0x4444444444444444444444444444444444444444"' "$TX"
+grep -q '"data": "0x81ff2930' "$TX"
 
 test -s "$ROOT/var/cli-events.ndjson"
 test -s "$ROOT/var/cli-metrics.prom"
